@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+engine/target/
+__pycache__/
+.venv/
+testdata/synthetic/
+CLAUDE.local.md
+.claude/settings.local.json
+.DS_Store
