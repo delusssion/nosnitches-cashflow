@@ -13,7 +13,8 @@
     "typecheck": "tsc -b --noEmit",
     "make-sample": "node scripts/make-sample.ts",
     "predev": "node scripts/copy-samples.mjs",
-    "prebuild": "node scripts/copy-samples.mjs"
+    "prebuild": "node scripts/copy-samples.mjs",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",
