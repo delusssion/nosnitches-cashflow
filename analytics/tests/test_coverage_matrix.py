@@ -1,6 +1,6 @@
 from common import DEALS_CSV
 from profile_deals import load_deals
-from test_matrix import FEATURES
+from coverage_matrix import FEATURES
 
 
 def hits(name):

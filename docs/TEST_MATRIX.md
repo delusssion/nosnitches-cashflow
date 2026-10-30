@@ -1,6 +1,6 @@
 # Матрица покрытия и приёмка движка
 
-Какие возможности калькулятора проверяет каждая из 55 тестовых сделок (`testdata/deals/test_deals.csv`) и какие из них есть в эталонах `testdata/golden/`. Таблицы генерирует `python analytics/scripts/test_matrix.py`.
+Какие возможности калькулятора проверяет каждая из 55 тестовых сделок (`testdata/deals/test_deals.csv`) и какие из них есть в эталонах `testdata/golden/`. Таблицы генерирует `python analytics/scripts/coverage_matrix.py`.
 
 ## Покрытие по возможностям
 

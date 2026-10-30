@@ -1,6 +1,6 @@
 """Матрица покрытия: какие возможности калькулятора покрывает каждая тестовая сделка.
 
-Запуск: python analytics/scripts/test_matrix.py — печатает таблицы для docs/TEST_MATRIX.md.
+Запуск: python analytics/scripts/coverage_matrix.py — печатает таблицы для docs/TEST_MATRIX.md.
 """
 
 from __future__ import annotations
