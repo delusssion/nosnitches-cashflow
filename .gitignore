@@ -11,3 +11,4 @@ CLAUDE.local.md
 .claude/
 docs/tasks/
 .DS_Store
+testdata/golden/all/

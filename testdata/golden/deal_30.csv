@@ -1,0 +1,13 @@
+report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principal_before,principal_after,rate,base_rate,accrual_start_dttm,accrual_end_dttm,accrual_days,year_frac,discriminator
+2022-08-31,30,1,2022-09-01,principal_payment,client,100000.00,500000.00,400000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,2,2022-09-15,repricing,client,0.00,400000.00,400000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,3,2022-09-15,interest_payment,client,7515.07,400000.00,400000.00,0.13,0.08,2022-08-01,2022-09-15,45,0.1232876712,SIMPLE
+2022-08-31,30,4,2022-10-01,principal_payment,client,100000.00,400000.00,300000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,5,2022-10-30,repricing,client,0.00,300000.00,300000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,6,2022-10-30,interest_payment,client,5378.08,300000.00,300000.00,0.13,0.08,2022-09-15,2022-10-30,45,0.1232876712,SIMPLE
+2022-08-31,30,7,2022-11-01,principal_payment,client,100000.00,300000.00,200000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,8,2022-12-01,principal_payment,client,100000.00,200000.00,100000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,9,2022-12-14,repricing,client,0.00,100000.00,100000.00,0.13,0.08,,,,,SIMPLE
+2022-08-31,30,10,2022-12-14,interest_payment,client,2813.70,100000.00,100000.00,0.13,0.08,2022-10-30,2022-12-14,45,0.1232876712,SIMPLE
+2022-08-31,30,11,2023-01-01,interest_payment,client,641.10,100000.00,100000.00,0.13,0.08,2022-12-14,2023-01-01,18,0.0493150685,SIMPLE
+2022-08-31,30,12,2023-01-01,close_payment,client,100000.00,100000.00,0.00,0.13,0.08,,,,,SIMPLE
