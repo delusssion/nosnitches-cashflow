@@ -4,6 +4,8 @@ import viteConfig from './vite.config';
 export default mergeConfig(
   viteConfig,
   defineConfig({
+    // Тесты читают демо-данные из ../testdata.
+    server: { fs: { allow: ['..'] } },
     test: {
       environment: 'jsdom',
       globals: true,
