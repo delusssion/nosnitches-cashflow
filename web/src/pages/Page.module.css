@@ -1,0 +1,9 @@
+.title {
+  font-size: 20px;
+  margin-bottom: var(--space-2);
+}
+
+.hint {
+  color: var(--c-muted);
+  margin: 0;
+}
