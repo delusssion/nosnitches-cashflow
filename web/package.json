@@ -10,7 +10,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "make-sample": "node scripts/make-sample.ts"
   },
   "dependencies": {
     "react": "^18.3.1",
