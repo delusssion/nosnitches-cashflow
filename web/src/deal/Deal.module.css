@@ -1,0 +1,43 @@
+.params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+
+.param {
+  min-width: 0;
+}
+
+.param dt {
+  color: var(--c-muted);
+  font-size: 12px;
+}
+
+.param dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dealList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
