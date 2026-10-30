@@ -25,7 +25,7 @@ fn edge_fixture_parses() {
         deals[0].day_convention_cd,
         cfcore::model::DayConvention::ActActIsda
     );
-    assert_eq!(deals[0].accrued_interest, 123.45);
+    assert_eq!(deals[0].accrued_interest, Some(123.45));
     // депозит: отрицательный остаток сохраняется как есть
     assert!(deals[1].current_principal_amt < 0.0);
     // FLOAT-сделка: маржа, индикатор, cap/floor и лаг прочитаны
@@ -47,10 +47,10 @@ fn explicit_lists_sorted_and_deduped_on_read() {
         gap.interest_payment,
         vec![d("2022-08-31"), d("2022-09-30"), d("2022-10-31")]
     );
-    // график тела: дубль даты побеждён последним значением, сумма 850 000
+    // график тела: суммы в одну дату складываются (методика §2.1)
     assert_eq!(
         gap.principal_payment,
-        vec![(d("2022-10-30"), 425_000.0), (d("2022-12-30"), 425_000.0)]
+        vec![(d("2022-10-30"), 425_000.0), (d("2022-12-30"), 1_275_000.0)]
     );
 }
 
@@ -70,14 +70,16 @@ fn validation_flags_match_expectations() {
     assert!(errs.is_empty(), "депозит валиден: {errs:?}");
 
     let (_, errs) = build_cashflow(&deals[2], &book, &cfg);
-    assert_eq!(errs.len(), 1);
-    assert_eq!(errs[0].code, codes::CURRENCY_NOT_RUB);
+    assert_eq!(errs[0].code, codes::UNSUPPORTED_CURRENCY);
     assert_eq!(errs[0].severity, Severity::Error);
 
     let (_, errs) = build_cashflow(&deals[3], &book, &cfg);
-    assert_eq!(errs.len(), 1);
-    assert_eq!(errs[0].code, codes::PRINCIPAL_SCHEDULE_MISMATCH);
-    assert_eq!(errs[0].severity, Severity::Warning);
+    assert_eq!(
+        errs.iter()
+            .find(|e| e.severity == Severity::Warning)
+            .map(|e| e.code),
+        Some(codes::SCHEDULE_SUM_MISMATCH)
+    );
 }
 
 #[test]

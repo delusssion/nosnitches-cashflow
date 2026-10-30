@@ -88,8 +88,10 @@ pub struct Deal {
     /// Код индикатора, например `CBKEY1M` (ключевая ставка ЦБ).
     pub base_indicator: Option<String>,
     pub day_convention_cd: DayConvention,
-    /// Проценты, накопленные к дате расчёта; входят в первый будущий платеж.
-    pub accrued_interest: f64,
+    /// Проценты, накопленные к дате расчёта (Q13): `Some` — задан (в т.ч.
+    /// 0.00), входит в первый будущий платёж; `None` — не задан, проценты
+    /// прошлого куска периода движок досчитывает сам.
+    pub accrued_interest: Option<f64>,
     pub cap_limit_interest_rate: Option<f64>,
     pub floor_limit_interest_rate: Option<f64>,
 
@@ -158,6 +160,19 @@ impl PaymentType {
             PaymentType::Prepayment => "prepayment",
         }
     }
+
+    /// Порядок событий в одну дату (методика §8 / контракт):
+    /// repricing/sub_repricing → interest → sub_payment → тело → close.
+    pub(crate) fn order_rank(self) -> u8 {
+        match self {
+            PaymentType::Repricing => 0,
+            PaymentType::SubRepricing => 1,
+            PaymentType::InterestPayment => 2,
+            PaymentType::SubPayment => 3,
+            PaymentType::PrincipalPayment | PaymentType::Prepayment => 4,
+            PaymentType::ClosePayment => 5,
+        }
+    }
 }
 
 /// Поток платежа — колонка `stream` формата 3.
@@ -222,15 +237,20 @@ impl Severity {
     }
 }
 
-/// Коды для `errors.csv`. Фиксированы здесь, чтобы совпадать с docs/DECISIONS.md.
+/// Коды для `errors.csv` — по методике §8, совпадают с эталоном аналитика.
 pub mod codes {
-    /// Валюта не RUB — сделка отклоняется (из валют только рубли, заметка эксперта).
-    pub const CURRENCY_NOT_RUB: &str = "CURRENCY_NOT_RUB";
+    /// Валюта не RUB — сделка отклоняется.
+    pub const UNSUPPORTED_CURRENCY: &str = "UNSUPPORTED_CURRENCY";
     /// Дата окончания не позже даты расчёта — считать нечего.
-    pub const MATURITY_IN_PAST: &str = "MATURITY_IN_PAST";
-    /// Сумма явного графика тела отличается от остатка (гипотеза H9:
-    /// разница уходит в close_payment, сделка считается с предупреждением).
-    pub const PRINCIPAL_SCHEDULE_MISMATCH: &str = "PRINCIPAL_SCHEDULE_MISMATCH";
+    pub const MATURITY_BEFORE_REPORT: &str = "MATURITY_BEFORE_REPORT";
+    /// FLOAT без индикатора — ставку не от чего считать.
+    pub const FLOAT_NO_INDICATOR: &str = "FLOAT_NO_INDICATOR";
+    /// Сумма явного графика тела отличается от остатка (H9: разница уходит
+    /// в close_payment, сделка считается с предупреждением).
+    pub const SCHEDULE_SUM_MISMATCH: &str = "SCHEDULE_SUM_MISMATCH";
+    /// FLOAT без правила и дат пересмотра — ставка зафиксирована на дату
+    /// сделки (Q14).
+    pub const FLOAT_NO_REPRICING: &str = "FLOAT_NO_REPRICING";
 }
 
 /// Одна запись `errors.csv`: `deal_id,severity,code,field,message`.

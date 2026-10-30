@@ -12,3 +12,4 @@ path = "src/main.rs"
 cfcore = { path = "../cfcore" }
 anyhow.workspace = true
 clap.workspace = true
+csv.workspace = true

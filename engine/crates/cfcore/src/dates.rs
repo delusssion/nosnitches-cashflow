@@ -77,47 +77,42 @@ pub fn parse_lag_months(s: &str) -> Option<i32> {
     Some(if s.starts_with('-') { -n } else { n })
 }
 
-/// Все даты правила в окне (`after`, `until`]:
-/// шаг делается от `start_dttm`, день события задаётся `day_num`
-/// (по умолчанию — день начала). Даты строго возрастают, без дублей.
-pub fn rule_schedule(rule: &PaymentRule, after: NaiveDate, until: NaiveDate) -> Vec<NaiveDate> {
+/// Все даты правила в интервале (`start_dttm`, `until`] — методика §2.2:
+/// месяцы перебираются с k = 0 (первая дата может быть в месяце начала,
+/// если `day_num` больше дня начала), дни — с k = 1. `ENDDATE` и пустой
+/// период дат не дают (дату погашения добавляют вызывающие). Даты строго
+/// возрастают, без дублей; будущее отсеивают вызывающие.
+pub fn rule_schedule(rule: &PaymentRule, until: NaiveDate) -> Vec<NaiveDate> {
     let Some(anchor) = rule.start_dttm else {
         return Vec::new();
     };
     let day_num = rule.day_num;
     let mut out = Vec::new();
     match rule.period_cd {
-        None | Some(PeriodCd::EndDate) => {
-            // без периодичности — единственное событие в дату окончания
-            if until > after {
-                out.push(until);
-            }
-        }
+        None | Some(PeriodCd::EndDate) => {}
         Some(PeriodCd::Months(n)) => {
             // шаг сетки = n месяцев (2M, 3M, 5M), а не один месяц
             let step = i32::try_from(n.max(1)).unwrap_or(i32::MAX);
-            let mut k = step;
+            let mut k = 0i32;
             loop {
-                let mut cand = add_months(anchor, k);
+                let mut cand = add_months(anchor, k * step);
                 if let Some(dn) = day_num {
                     cand = with_day_num(cand, dn);
                 }
                 if cand > until {
                     break;
                 }
-                if cand > after && out.last().is_none_or(|&prev| prev < cand) {
+                if cand > anchor {
                     out.push(cand);
                 }
-                k += step;
+                k += 1;
             }
         }
         Some(PeriodCd::Days(n)) => {
             let step = Duration::days(i64::from(n));
             let mut cand = anchor + step;
             while cand <= until {
-                if cand > after {
-                    out.push(cand);
-                }
+                out.push(cand);
                 cand += step;
             }
         }
@@ -140,8 +135,8 @@ pub fn parse_date_list(s: &str) -> Result<Vec<NaiveDate>, String> {
 }
 
 /// Явный график «дата,сумма» через пробел (`principal_payment` и
-/// `repricing_dttm_rate_schedule_fixed`): сортировка по дате, дубликаты
-/// дат убираются (последнее значение побеждает).
+/// `repricing_dttm_rate_schedule_fixed`): сортировка по дате; суммы в одну
+/// дату складываются (методика §2.1).
 pub fn parse_pairs(s: &str) -> Result<Vec<(NaiveDate, f64)>, String> {
     let mut pairs = Vec::new();
     for tok in s.split_whitespace() {
@@ -154,15 +149,14 @@ pub fn parse_pairs(s: &str) -> Result<Vec<(NaiveDate, f64)>, String> {
         pairs.push((d, a));
     }
     pairs.sort_by_key(|(d, _)| *d);
-    // std-овский dedup держит первое из равных, а по контракту — последнее
-    let mut deduped: Vec<(NaiveDate, f64)> = Vec::with_capacity(pairs.len());
+    let mut merged: Vec<(NaiveDate, f64)> = Vec::with_capacity(pairs.len());
     for (d, a) in pairs {
-        match deduped.last_mut() {
-            Some((last_d, last_a)) if *last_d == d => *last_a = a,
-            _ => deduped.push((d, a)),
+        match merged.last_mut() {
+            Some((last_d, last_a)) if *last_d == d => *last_a += a,
+            _ => merged.push((d, a)),
         }
     }
-    Ok(deduped)
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -207,6 +201,14 @@ mod tests {
         assert_eq!(parse_lag_months("45D"), None);
     }
 
+    /// Окно (after, until] поверх полной сетки правила — как зовут движки.
+    fn in_window(rule: &PaymentRule, after: NaiveDate, until: NaiveDate) -> Vec<NaiveDate> {
+        rule_schedule(rule, until)
+            .into_iter()
+            .filter(|d| *d > after)
+            .collect()
+    }
+
     #[test]
     fn monthly_schedule_from_anchor_with_day_num() {
         let rule = PaymentRule {
@@ -215,7 +217,7 @@ mod tests {
             day_num: Some(14),
         };
         // окно с 2022-08-31 по 2022-12-14
-        let got = rule_schedule(&rule, d("2022-08-31"), d("2022-12-14"));
+        let got = in_window(&rule, d("2022-08-31"), d("2022-12-14"));
         let want = vec![
             d("2022-09-14"),
             d("2022-10-14"),
@@ -226,13 +228,43 @@ mod tests {
     }
 
     #[test]
+    fn monthly_k_zero_includes_anchor_month_when_day_num_later() {
+        // методика §2.2: k = 0 — дата в месяце начала, если day_num позже
+        let rule = PaymentRule {
+            start_dttm: Some(d("2022-11-01")),
+            period_cd: parse_period_cd("1M"),
+            day_num: Some(20),
+        };
+        let got = rule_schedule(&rule, d("2023-02-28"));
+        assert_eq!(
+            got,
+            vec![
+                d("2022-11-20"),
+                d("2022-12-20"),
+                d("2023-01-20"),
+                d("2023-02-20")
+            ]
+        );
+        // день раньше дня начала — k=0 до начала, сетка со следующего месяца
+        let rule2 = PaymentRule {
+            start_dttm: Some(d("2022-11-25")),
+            period_cd: parse_period_cd("1M"),
+            day_num: Some(7),
+        };
+        assert_eq!(
+            rule_schedule(&rule2, d("2023-01-31")),
+            vec![d("2022-12-07"), d("2023-01-07")]
+        );
+    }
+
+    #[test]
     fn monthly_day_num_minus_one_sticks_to_month_end() {
         let rule = PaymentRule {
             start_dttm: Some(d("2022-08-16")),
             period_cd: parse_period_cd("1M"),
             day_num: Some(-1),
         };
-        let got = rule_schedule(&rule, d("2022-08-31"), d("2022-11-30"));
+        let got = in_window(&rule, d("2022-08-31"), d("2022-11-30"));
         assert_eq!(got, vec![d("2022-09-30"), d("2022-10-31"), d("2022-11-30")]);
     }
 
@@ -243,7 +275,7 @@ mod tests {
             period_cd: parse_period_cd("1M"),
             day_num: None,
         };
-        let got = rule_schedule(&rule, d("2022-12-31"), d("2023-03-31"));
+        let got = in_window(&rule, d("2022-12-31"), d("2023-03-31"));
         assert_eq!(got, vec![d("2023-01-31"), d("2023-02-28"), d("2023-03-31")]);
     }
 
@@ -254,7 +286,7 @@ mod tests {
             period_cd: parse_period_cd("45D"),
             day_num: None,
         };
-        let got = rule_schedule(&rule, d("2022-08-31"), d("2023-01-31"));
+        let got = in_window(&rule, d("2022-08-31"), d("2023-01-31"));
         assert_eq!(
             got,
             vec![
@@ -267,19 +299,20 @@ mod tests {
     }
 
     #[test]
-    fn enddate_and_empty_rule_give_single_maturity_event() {
+    fn enddate_and_empty_rule_give_no_dates() {
+        // ENDDATE и пустой период дат не дают — Tm добавляют вызывающие (§2.2)
         let rule = PaymentRule {
             start_dttm: Some(d("2022-08-16")),
             period_cd: parse_period_cd("ENDDATE"),
             day_num: None,
         };
         assert_eq!(
-            rule_schedule(&rule, d("2022-08-31"), d("2023-03-14")),
-            vec![d("2023-03-14")]
+            rule_schedule(&rule, d("2023-03-14")),
+            Vec::<NaiveDate>::new()
         );
         let empty = PaymentRule::default();
         assert_eq!(
-            rule_schedule(&empty, d("2022-08-31"), d("2023-03-14")),
+            rule_schedule(&empty, d("2023-03-14")),
             Vec::<NaiveDate>::new()
         );
     }
@@ -292,11 +325,11 @@ mod tests {
     }
 
     #[test]
-    fn pairs_sort_and_last_duplicate_wins() {
+    fn pairs_sort_and_same_date_amounts_sum() {
         let got = parse_pairs("2022-11-30,52250.0 2022-10-31,50000.0 2022-11-30,53000.0").unwrap();
         assert_eq!(
             got,
-            vec![(d("2022-10-31"), 50000.0), (d("2022-11-30"), 53000.0)]
+            vec![(d("2022-10-31"), 50000.0), (d("2022-11-30"), 105250.0)]
         );
         assert!(parse_pairs("2022-11-30;52250.0").is_err());
     }

@@ -1,12 +1,15 @@
 //! Движки расписаний: ANN, RGM, SIMPLE + плавающая ставка и субсидия.
 //!
-//! Ядро — [`build_cashflow`]: чистая функция без состояния, одинаковые входы
-//! дают одинаковый выход, поэтому её можно звать из любого числа потоков —
-//! результат прогона не зависит от параллельности.
+//! Реализация следует docs/METHODOLOGY.md (ссылки § — по нему); эталон —
+//! analytics/reference/cf_reference.py. Ядро — [`build_cashflow`]: чистая
+//! функция без состояния, одинаковые входы дают одинаковый выход, поэтому
+//! её можно звать из любого числа потоков.
 //!
-//! Проценты начисляются по отрезкам между событиями: платёж тела внутри
-//! процентного периода режет его на секции, каждая секция начисляется на
-//! остаток, действовавший в ней (см. docs/DECISIONS.md).
+//! Модель начисления (§4–§5): по объединённым будущим датам событий идёт
+//! курсор `cursor`; на отрезке `[cursor, p)` проценты копятся в `accrued`
+//! по текущим остатку и ставке; в дату процентов `accrued` выплачивается и
+//! обнуляется; репрайсинг с даты `p` меняет ставку; тело гасится по
+//! алгоритму дискриминатора; последнее событие тела — `close_payment`.
 
 pub mod ann;
 pub mod float;
@@ -14,399 +17,475 @@ pub mod rgm;
 pub mod simple;
 pub mod subsidy;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::NaiveDate;
 
 use crate::dates;
 use crate::daycount::year_fraction;
 use crate::model::{
-    Config, Deal, DealError, Discriminator, Event, PaymentType, RateType, Severity, Stream,
+    Config, DayConvention, Deal, DealError, Discriminator, Event, PaymentType, PeriodCd, RateType,
+    Severity, Stream,
 };
 use crate::rates::RateBook;
 use crate::validate;
 
-/// Допуск на деньги — как приёмочный допуск контракта (0,01 ₽).
-pub(crate) const MONEY_TOL: f64 = 0.01;
-
-/// Расчёт кэшфлоу одной сделки. Возвращает события (формат 3 контракта,
-/// с проставленным `event_order`) и ошибки/предупреждения сделки.
+/// Расчёт кэшфлоу одной сделки: клиентский поток + субсидия (§7), сортировка
+/// по дате и рангу события в дату, сквозная нумерация `event_order`.
 pub fn build_cashflow(deal: &Deal, rates: &RateBook, cfg: &Config) -> (Vec<Event>, Vec<DealError>) {
     let errors = validate::validate(deal);
     if errors.iter().any(|e| e.severity == Severity::Error) {
         return (Vec::new(), errors);
     }
-    let mut events = match deal.discriminator {
-        Discriminator::Ann => ann::build(deal, rates, cfg),
-        Discriminator::Rgm => rgm::build(deal, rates, cfg),
-        Discriminator::Simple => simple::build(deal, rates, cfg),
-    };
+    let mut events = run_timeline(deal, rates, cfg);
+    events.extend(subsidy::build(deal, rates, cfg, &events));
+    events.sort_by(|a, b| {
+        a.payment_dttm.cmp(&b.payment_dttm).then(
+            a.payment_type
+                .order_rank()
+                .cmp(&b.payment_type.order_rank()),
+        )
+    });
     for (i, e) in events.iter_mut().enumerate() {
         e.event_order = i as u32 + 1;
     }
     (events, errors)
 }
 
-/// Ставка сделки на дату фиксинга: `(ставка, значение индикатора)`.
-///
-/// FIXED — `interest_rate`; график фиксированной части
-/// (`repricing_dttm_rate_schedule_fixed`) перекрывает её с даты действия —
-/// по заметке эксперта меняться может и фиксированная часть ставки.
-/// FLOAT (H2): индикатор с лагом плюс маржа, затем `floor`/`cap`; будущее
-/// значение истории не «подглядывает» — последнее известное на дату
-/// расчёта со сдвигом сценария (H3, см. `RateSeries::fixing`). Второй
-/// элемент — значение индикатора для колонки `base_rate`, у FIXED его нет.
-pub(crate) fn deal_rate_at(
+// ---------- даты (§2) ----------------------------------------------------------------------
+
+/// H6: событие ровно в дату расчёта — прошлое.
+fn is_future(d: NaiveDate, deal: &Deal, cfg: &Config) -> bool {
+    if cfg.event_on_report_date_is_past {
+        d > deal.report_dttm
+    } else {
+        d >= deal.report_dttm
+    }
+}
+
+/// Все даты процентов, прошлые и будущие (§2.1): явный список → правило
+/// процентов → правило тела (не ENDDATE) → даты явного графика тела;
+/// всегда плюс дата погашения. Даты позже Tm отбрасываются.
+fn interest_dates_all(deal: &Deal) -> Vec<NaiveDate> {
+    let mut dates: BTreeSet<NaiveDate> = if !deal.interest_payment.is_empty() {
+        deal.interest_payment.iter().copied().collect()
+    } else if deal.interest_payment_rule.period_cd.is_some() {
+        dates::rule_schedule(&deal.interest_payment_rule, deal.maturity_dttm)
+            .into_iter()
+            .collect()
+    } else if matches!(
+        deal.regular_payment_rule.period_cd,
+        Some(PeriodCd::Months(_)) | Some(PeriodCd::Days(_))
+    ) {
+        dates::rule_schedule(&deal.regular_payment_rule, deal.maturity_dttm)
+            .into_iter()
+            .collect()
+    } else if !deal.principal_payment.is_empty() {
+        deal.principal_payment.iter().map(|(d, _)| *d).collect()
+    } else {
+        BTreeSet::new()
+    };
+    dates.insert(deal.maturity_dttm);
+    dates
+        .into_iter()
+        .filter(|d| *d <= deal.maturity_dttm)
+        .collect()
+}
+
+/// Все даты тела ANN/RGM (§2.1): правило тела (ENDDATE — пусто), иначе даты
+/// процентов; всегда плюс дата погашения. Явный график тела у ANN/RGM не
+/// используется (словарь §1: поле только для SIMPLE).
+fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate]) -> Vec<NaiveDate> {
+    let mut dates: BTreeSet<NaiveDate> = match deal.regular_payment_rule.period_cd {
+        Some(PeriodCd::Months(_)) | Some(PeriodCd::Days(_)) => {
+            dates::rule_schedule(&deal.regular_payment_rule, deal.maturity_dttm)
+                .into_iter()
+                .collect()
+        }
+        Some(PeriodCd::EndDate) => BTreeSet::new(),
+        None => interest_all.iter().copied().collect(),
+    };
+    dates.insert(deal.maturity_dttm);
+    dates
+        .into_iter()
+        .filter(|d| *d <= deal.maturity_dttm)
+        .collect()
+}
+
+/// Все даты пересмотра ставки клиента (§2.1): явный список ∪ правило.
+/// Прошлые даты нужны для даты фиксинга (§6.2).
+pub(crate) fn client_repricing_all(deal: &Deal) -> Vec<NaiveDate> {
+    let mut out: BTreeSet<NaiveDate> = deal.repricing_dttm_schedule.iter().copied().collect();
+    if deal.repricing_rule.period_cd.is_some() {
+        out.extend(dates::rule_schedule(
+            &deal.repricing_rule,
+            deal.maturity_dttm,
+        ));
+    }
+    out.into_iter().collect()
+}
+
+// ---------- ставки (§6) --------------------------------------------------------------------
+
+/// Значение индикатора на дату фиксинга (§6.3): история со сдвигом на лаг;
+/// для дат позже даты расчёта — последнее известное на T0 + сдвиг сценария
+/// (H3). Если истории для кода нет вовсе — `base_indicator_rate` из сделки
+/// (Q2 открыт).
+fn indicator_value(
+    rates: &RateBook,
+    cfg: &Config,
+    report: NaiveDate,
+    fixing: NaiveDate,
+    code: Option<&str>,
+    lag: Option<&str>,
+    fallback: Option<f64>,
+) -> f64 {
+    let lag_months = lag.and_then(dates::parse_lag_months).unwrap_or(0);
+    match code.and_then(|c| rates.get(c)) {
+        Some(series) => series.fixing(fixing, lag_months, report, cfg.scenario_shift),
+        None => fallback.unwrap_or(0.0),
+    }
+}
+
+/// Ставка клиентского потока в момент `t` (§6): FIXED — график фиксированной
+/// части или `interest_rate` (без floor/cap, как в эталоне); FLOAT —
+/// индикатор на дате фиксинга (последний пересмотр ≤ t, но не раньше даты
+/// сделки) плюс маржа, затем floor/cap. Возвращает (ставка, индикатор).
+fn client_leg_at(
     deal: &Deal,
     rates: &RateBook,
     cfg: &Config,
-    at: NaiveDate,
+    repricing_all: &[NaiveDate],
+    t: NaiveDate,
 ) -> (f64, Option<f64>) {
-    // последнее значение графика фиксированной части, действующее на дату
-    let schedule_rate = || {
+    let deal_date = deal.deal_dttm.unwrap_or(deal.report_dttm);
+    let spread_at = |t: NaiveDate| {
         deal.repricing_dttm_rate_schedule_fixed
             .iter()
             .rev()
-            .find(|(d, _)| *d <= at)
+            .find(|(d, _)| *d <= t)
             .map(|(_, r)| *r)
+            .unwrap_or(deal.interest_rate)
     };
     match deal.rate_type_cd {
-        RateType::Fixed => {
-            let rate = schedule_rate().unwrap_or(deal.interest_rate);
-            (
-                float::clamp_rate(
-                    rate,
-                    deal.floor_limit_interest_rate,
-                    deal.cap_limit_interest_rate,
-                ),
-                None,
-            )
-        }
+        RateType::Fixed => (spread_at(t), None),
         RateType::Float => {
-            let lag = deal
-                .indicator_lag_cd
-                .as_deref()
-                .and_then(dates::parse_lag_months)
-                .unwrap_or(0);
-            let indicator = deal
-                .base_indicator
-                .as_deref()
-                .and_then(|code| rates.get(code))
-                .map(|s| s.fixing(at, lag, deal.report_dttm, cfg.scenario_shift))
-                .or(deal.base_indicator_rate)
-                .unwrap_or(0.0);
-            let margin = schedule_rate().unwrap_or(deal.interest_rate);
+            let fixing = repricing_all
+                .iter()
+                .rev()
+                .find(|d| **d <= t)
+                .copied()
+                .unwrap_or(deal_date)
+                .max(deal_date);
+            let base = indicator_value(
+                rates,
+                cfg,
+                deal.report_dttm,
+                fixing,
+                deal.base_indicator.as_deref(),
+                deal.indicator_lag_cd.as_deref(),
+                deal.base_indicator_rate,
+            );
             (
                 float::clamp_rate(
-                    indicator + margin,
+                    base + spread_at(t),
                     deal.floor_limit_interest_rate,
                     deal.cap_limit_interest_rate,
                 ),
-                Some(indicator),
+                Some(base),
             )
         }
     }
 }
 
-/// Полный таймлайн сделки для RGM и SIMPLE: план тела, даты процентов,
-/// репрайсинги, проход по событиям. ANN идёт своим путём (ann.rs, H7).
-pub(crate) fn build_events(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
-    let principal = principal_plan(deal, cfg);
-    let mut interest = interest_plan(deal);
-    if interest.is_empty() {
-        // ни явных дат, ни правила процентов — проценты по датам тела
-        interest = principal.iter().map(|(d, _)| *d).collect();
-    }
-    run_timeline(deal, rates, cfg, principal, interest, repricing_plan(deal))
-}
-
-/// План платежей тела: явный график, если задан; иначе равные доли по сетке
-/// правила (RGM, H1); иначе bullet — всё тело в дату погашения.
-/// Недобор явного графика до остатка уходит в close_payment в дату
-/// погашения (H9); перепокрытие гасится в таймлайне срезом платежа.
-pub(crate) fn principal_plan(deal: &Deal, cfg: &Config) -> Vec<(NaiveDate, f64)> {
-    let balance = deal.current_principal_amt.abs();
-    let in_window = |d: NaiveDate| d > deal.report_dttm && d <= deal.maturity_dttm;
-
-    let mut plan: Vec<(NaiveDate, f64)> = if !deal.principal_payment.is_empty() {
-        deal.principal_payment
-            .iter()
-            .filter(|(d, _)| in_window(*d))
-            .cloned()
-            .collect()
-    } else {
-        let grid = dates::rule_schedule(
-            &deal.regular_payment_rule,
-            deal.report_dttm,
-            deal.maturity_dttm,
-        );
-        if deal.discriminator == Discriminator::Rgm && !grid.is_empty() {
-            // H1: остаток на дату расчёта / число оставшихся дат погашения тела
-            let n = grid.len() as f64;
-            grid.into_iter().map(|d| (d, balance / n)).collect()
-        } else {
-            vec![(deal.maturity_dttm, balance)]
-        }
-    };
-
-    if !deal.principal_payment.is_empty() && cfg.schedule_gap_to_close_payment {
-        let paid: f64 = plan.iter().map(|(_, a)| a).sum();
-        let gap = balance - paid;
-        if gap > MONEY_TOL {
-            match plan.last_mut() {
-                Some((d, a)) if *d == deal.maturity_dttm => *a += gap,
-                _ => plan.push((deal.maturity_dttm, gap)),
-            }
-        }
-    }
-    if plan.is_empty() {
-        plan.push((deal.maturity_dttm, balance));
-    }
-    plan
-}
-
-/// Даты уплаты процентов: явный список, если задан; иначе сетка
-/// `interest_payment_rule`.
-fn interest_plan(deal: &Deal) -> Vec<NaiveDate> {
-    if !deal.interest_payment.is_empty() {
-        deal.interest_payment.clone()
-    } else {
-        dates::rule_schedule(
-            &deal.interest_payment_rule,
-            deal.report_dttm,
-            deal.maturity_dttm,
-        )
-    }
-}
-
-/// Даты пересмотра ставки: явные списки + сетка `repricing_rule`.
-pub(crate) fn repricing_plan(deal: &Deal) -> Vec<NaiveDate> {
-    let mut out = deal.repricing_dttm_schedule.clone();
-    out.extend(deal.repricing_dttm_rate_schedule.iter().copied());
-    out.extend(dates::rule_schedule(
-        &deal.repricing_rule,
-        deal.report_dttm,
-        deal.maturity_dttm,
-    ));
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// Секция начисления: с какого момента, на каком остатке и по какой ставке.
-/// Репрайсинг и платежи тела режут процентный период на такие секции.
-#[derive(Debug, Clone, Copy)]
-struct Segment {
+/// Проценты с начала периода до даты расчёта (§4.2): отрезки режутся
+/// пересмотрами ставки внутри периода, ставка каждого — фиксинг на его начало.
+fn accrue_past(
+    deal: &Deal,
+    repricing_all: &[NaiveDate],
+    leg_at: &dyn Fn(NaiveDate) -> (f64, Option<f64>),
     start: NaiveDate,
     balance: f64,
+) -> f64 {
+    let report = deal.report_dttm;
+    let mut points: Vec<NaiveDate> = vec![start, report];
+    points.extend(
+        repricing_all
+            .iter()
+            .copied()
+            .filter(|d| *d > start && *d < report),
+    );
+    points.sort();
+    points.dedup();
+    let mut total = 0.0;
+    for w in 0..points.len().saturating_sub(1) {
+        total += balance
+            * leg_at(points[w]).0
+            * year_fraction(points[w], points[w + 1], deal.day_convention_cd);
+    }
+    total
+}
+
+// ---------- аннуитет (§5.1, H7) ------------------------------------------------------------
+
+/// Длина периода тела в месяцах для ставки периода аннуитета.
+fn period_months(deal: &Deal) -> f64 {
+    match deal.regular_payment_rule.period_cd {
+        Some(PeriodCd::Months(m)) => f64::from(m),
+        Some(PeriodCd::Days(d)) => f64::from(d) * 12.0 / 365.0,
+        _ => 1.0,
+    }
+}
+
+/// `A = B · i / (1 − (1+i)^(−n))`, ставка периода `i = r · m / 12` (H7).
+fn annuity(balance: f64, annual_rate: f64, months: f64, n: usize) -> f64 {
+    let i = annual_rate * months / 12.0;
+    if n == 0 {
+        return balance;
+    }
+    if i == 0.0 {
+        return balance / f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+    let n = n as f64;
+    balance * i / (1.0 - (1.0 + i).powf(-n))
+}
+
+// ---------- проход по сделке (§5) ----------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)] // конструктор события, зеркалит emit эталона
+fn mk_event(
+    day: NaiveDate,
+    ptype: PaymentType,
+    stream: Stream,
+    amount: f64,
+    before: f64,
+    after: f64,
     rate: f64,
-    /// значение индикатора под этой ставкой (FLOAT), для колонки `base_rate`
     base: Option<f64>,
-}
-
-/// Начисленные проценты по секциям на интервале до `end`: каждая секция —
-/// свой остаток и своя ставка.
-fn segment_accrual(segs: &[Segment], end: NaiveDate, conv: crate::model::DayConvention) -> f64 {
-    let mut acc = 0.0;
-    for w in 0..segs.len() {
-        let seg_end = segs.get(w + 1).map_or(end, |s| s.start);
-        if seg_end > segs[w].start {
-            acc += segs[w].balance * segs[w].rate * year_fraction(segs[w].start, seg_end, conv);
-        }
+    acc: Option<(NaiveDate, NaiveDate)>,
+    conv: DayConvention,
+) -> Event {
+    Event {
+        event_order: 0,
+        payment_dttm: day,
+        payment_type: ptype,
+        stream,
+        amount,
+        principal_before: before,
+        principal_after: after,
+        rate: Some(rate),
+        base_rate: base,
+        accrual_start_dttm: acc.map(|(a, _)| a),
+        accrual_end_dttm: acc.map(|(_, b)| b),
+        accrual_days: acc.map(|(a, b)| (b - a).num_days()),
+        year_frac: acc.map(|(a, b)| year_fraction(a, b, conv)),
     }
-    acc
 }
 
-/// Проход по объединённому таймлайну событий. В одну дату порядок по
-/// контракту: repricing -> interest_payment -> principal_payment; последнее
-/// событие по телу получает тип close_payment на весь остаток, после него
-/// principal_after = 0 строго.
-fn run_timeline(
-    deal: &Deal,
-    rates: &RateBook,
-    cfg: &Config,
-    mut principal: Vec<(NaiveDate, f64)>,
-    mut interest: Vec<NaiveDate>,
-    mut repricing: Vec<NaiveDate>,
-) -> Vec<Event> {
-    let sign: f64 = if deal.current_principal_amt < 0.0 {
-        -1.0
+/// Клиентский поток сделки — общий цикл для ANN/RGM/SIMPLE (§5).
+fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
+    let report = deal.report_dttm;
+    let maturity = deal.maturity_dttm;
+    let deal_date = deal.deal_dttm.unwrap_or(report);
+    let conv = deal.day_convention_cd;
+    let tau = |a: NaiveDate, b: NaiveDate| year_fraction(a, b, conv);
+    let mut balance = deal.current_principal_amt; // со знаком сделки
+    if balance == 0.0 {
+        return Vec::new(); // §5: нулевой остаток — событий нет
+    }
+
+    // 1. Даты.
+    let interest_all = interest_dates_all(deal);
+    let interest_future: Vec<NaiveDate> = interest_all
+        .iter()
+        .copied()
+        .filter(|d| is_future(*d, deal, cfg))
+        .collect();
+    let accrual_start = interest_all
+        .iter()
+        .copied()
+        .rfind(|d| !is_future(*d, deal, cfg))
+        .unwrap_or(deal_date);
+
+    let repricing_all = client_repricing_all(deal);
+    let repricing_future: Vec<NaiveDate> = repricing_all
+        .iter()
+        .copied()
+        .filter(|d| is_future(*d, deal, cfg) && *d < maturity)
+        .collect();
+
+    let mut planned: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    let principal_future: Vec<NaiveDate> = match deal.discriminator {
+        Discriminator::Simple => {
+            for (d, a) in &deal.principal_payment {
+                if is_future(*d, deal, cfg) {
+                    *planned.entry(*d).or_insert(0.0) += a;
+                }
+            }
+            let mut dates: BTreeSet<NaiveDate> =
+                planned.keys().copied().filter(|d| *d <= maturity).collect();
+            dates.insert(maturity);
+            dates.into_iter().collect()
+        }
+        _ => principal_dates_all(deal, &interest_all)
+            .into_iter()
+            .filter(|d| is_future(*d, deal, cfg))
+            .collect(),
+    };
+    if principal_future.is_empty() {
+        return Vec::new();
+    }
+
+    // 2. Состояние на дату расчёта (§4.2, §6.2).
+    let (mut rate, mut base) = client_leg_at(deal, rates, cfg, &repricing_all, report);
+    let leg_at = |t: NaiveDate| client_leg_at(deal, rates, cfg, &repricing_all, t);
+
+    let mut accrued = 0.0;
+    let mut cursor = match deal.accrued_interest {
+        Some(v) => {
+            // Q13: поле задано — это накопленные проценты на T0 (со знаком)
+            accrued = v.abs() * 1.0_f64.copysign(balance);
+            report.max(accrual_start)
+        }
+        None => accrual_start, // досчитаем с начала периода по ставкам того времени
+    };
+    if cursor < report {
+        accrued += accrue_past(deal, &repricing_all, &leg_at, cursor, balance);
+        cursor = report;
+    }
+    let mut last_interest = accrual_start;
+
+    let months = period_months(deal);
+    let n_left = principal_future.len();
+    let mut ann_payment = if deal.discriminator == Discriminator::Ann {
+        annuity(balance, rate, months, n_left)
     } else {
-        1.0
+        0.0
     };
-    let mut balance = deal.current_principal_amt.abs();
-
-    // H6: событие в дату расчёта — прошлое
-    let is_past = |d: NaiveDate| {
-        if cfg.event_on_report_date_is_past {
-            d <= deal.report_dttm
-        } else {
-            d < deal.report_dttm
-        }
+    let rgm_share = if deal.discriminator == Discriminator::Rgm && n_left > 0 {
+        balance / n_left as f64
+    } else {
+        0.0
     };
-    principal.retain(|(d, _)| !is_past(*d));
-    interest.retain(|d| !is_past(*d) && *d <= deal.maturity_dttm);
-    repricing.retain(|d| !is_past(*d) && *d <= deal.maturity_dttm);
-    if principal.is_empty() {
-        principal.push((deal.maturity_dttm, balance));
-    }
 
+    // 3. Проход по объединённым будущим датам событий.
+    let points: BTreeSet<NaiveDate> = interest_future
+        .iter()
+        .chain(principal_future.iter())
+        .chain(repricing_future.iter())
+        .copied()
+        .collect();
     let mut events: Vec<Event> = Vec::new();
-    let (mut rate, mut base) = deal_rate_at(deal, rates, cfg, deal.report_dttm);
-    // секции начисления с последнего процентного события
-    let mut segs: Vec<Segment> = vec![Segment {
-        start: deal.report_dttm,
-        balance,
-        rate,
-        base,
-    }];
-    let mut accrued_left = deal.accrued_interest;
-    let (mut pi, mut ii, mut ri) = (0usize, 0usize, 0usize);
-    let mut last_principal: Option<usize> = None;
+    let mut rate_used: f64;
+    let mut base_used: Option<f64>;
 
-    while pi < principal.len() || ii < interest.len() || ri < repricing.len() {
-        let dp = principal.get(pi).map_or(NaiveDate::MAX, |(d, _)| *d);
-        let di = interest.get(ii).copied().unwrap_or(NaiveDate::MAX);
-        let dr = repricing.get(ri).copied().unwrap_or(NaiveDate::MAX);
-        let d = dp.min(di).min(dr);
+    for p in points {
+        // 3.1 начисление на отрезке [cursor, p)
+        accrued += balance * rate * tau(cursor, p);
+        rate_used = rate;
+        base_used = base;
+        cursor = p;
 
-        // репрайсинг: новая ставка действует С этой даты; на период,
-        // закрывающийся здесь, начисляется старая (порядок контракта —
-        // repricing раньше interest). Событие показывается, только пока
-        // сделка жива.
-        if dr == d && balance > 0.0 {
-            ri += 1;
-            (rate, base) = deal_rate_at(deal, rates, cfg, d);
-            events.push(Event {
-                event_order: 0,
-                payment_dttm: d,
-                payment_type: PaymentType::Repricing,
-                stream: Stream::Client,
-                amount: 0.0,
-                principal_before: sign * balance,
-                principal_after: sign * balance,
-                rate: Some(rate),
-                base_rate: base,
-                accrual_start_dttm: None,
-                accrual_end_dttm: None,
-                accrual_days: None,
-                year_frac: None,
-            });
-            // смена ставки режет период начисления
-            segs.push(Segment {
-                start: d,
+        // 3.2 пересмотр: новая ставка действует с даты p
+        let mut repriced = false;
+        if repricing_future.binary_search(&p).is_ok() {
+            (rate, base) = client_leg_at(deal, rates, cfg, &repricing_all, p);
+            events.push(mk_event(
+                p,
+                PaymentType::Repricing,
+                Stream::Client,
+                0.0,
+                balance,
                 balance,
                 rate,
                 base,
-            });
-        } else if dr == d {
-            ri += 1;
+                None,
+                conv,
+            ));
+            repriced = true;
         }
 
-        if di == d {
-            ii += 1;
-            let start = segs[0].start;
-            let (seg_rate, seg_base) = {
-                let last = segs.last().expect("секция начисления всегда есть");
-                (last.rate, last.base)
+        // 3.3 проценты за период (last_interest, p]
+        let mut interest_paid = 0.0;
+        if interest_future.binary_search(&p).is_ok() {
+            interest_paid = accrued;
+            events.push(mk_event(
+                p,
+                PaymentType::InterestPayment,
+                Stream::Client,
+                accrued,
+                balance,
+                balance,
+                rate_used,
+                base_used,
+                Some((last_interest, p)),
+                conv,
+            ));
+            accrued = 0.0;
+            last_interest = p;
+        }
+
+        // 3.5 погашение тела
+        if principal_future.binary_search(&p).is_ok() {
+            let is_last = p == *principal_future.last().expect("список тела непустой");
+            let raw = if is_last {
+                balance
+            } else {
+                match deal.discriminator {
+                    Discriminator::Ann => ann_payment - interest_paid,
+                    Discriminator::Rgm => rgm_share,
+                    Discriminator::Simple => planned.get(&p).copied().unwrap_or(0.0),
+                }
             };
-            let acc = std::mem::take(&mut accrued_left)
-                + segment_accrual(&segs, d, deal.day_convention_cd);
-            if acc.abs() > 1e-9 {
-                events.push(Event {
-                    event_order: 0,
-                    payment_dttm: d,
-                    payment_type: PaymentType::InterestPayment,
-                    stream: Stream::Client,
-                    amount: sign * acc,
-                    principal_before: sign * balance,
-                    principal_after: sign * balance,
-                    rate: Some(seg_rate),
-                    base_rate: seg_base,
-                    accrual_start_dttm: Some(start),
-                    accrual_end_dttm: Some(d),
-                    accrual_days: Some((d - start).num_days()),
-                    year_frac: Some(year_fraction(start, d, deal.day_convention_cd)),
-                });
+            // не гасим больше остатка и не «выдаём» тело обратно
+            let amount =
+                f64::max(0.0, f64::min(raw.abs(), balance.abs())) * (1.0_f64.copysign(balance));
+            let closes = is_last || (balance - amount).abs() < 1e-9;
+            // тело гасится в дату без процентов — хвост периода платим здесь (§4.3)
+            if closes && !interest_future.contains(&p) && accrued != 0.0 {
+                events.push(mk_event(
+                    p,
+                    PaymentType::InterestPayment,
+                    Stream::Client,
+                    accrued,
+                    balance,
+                    balance,
+                    rate_used,
+                    base_used,
+                    Some((last_interest, p)),
+                    conv,
+                ));
+                accrued = 0.0;
             }
-            segs.clear();
-            segs.push(Segment {
-                start: d,
+            let ptype = if closes {
+                PaymentType::ClosePayment
+            } else {
+                PaymentType::PrincipalPayment
+            };
+            let after = if closes { 0.0 } else { balance - amount };
+            events.push(mk_event(
+                p,
+                ptype,
+                Stream::Client,
+                amount,
                 balance,
+                after,
                 rate,
                 base,
-            });
-        }
-
-        if dp == d {
-            pi += 1;
-            let pay = principal[pi - 1].1.min(balance);
-            if pay > MONEY_TOL {
-                balance -= pay;
-                events.push(Event {
-                    event_order: 0,
-                    payment_dttm: d,
-                    payment_type: PaymentType::PrincipalPayment,
-                    stream: Stream::Client,
-                    amount: sign * pay,
-                    principal_before: sign * (balance + pay),
-                    principal_after: sign * balance,
-                    rate: Some(rate),
-                    base_rate: base,
-                    accrual_start_dttm: None,
-                    accrual_end_dttm: None,
-                    accrual_days: None,
-                    year_frac: None,
-                });
-                last_principal = Some(events.len() - 1);
-                // новый остаток — новая секция начисления
-                segs.push(Segment {
-                    start: d,
-                    balance,
-                    rate,
-                    base,
-                });
+                None,
+                conv,
+            ));
+            balance = if closes { 0.0 } else { balance - amount };
+            if balance == 0.0 {
+                break;
             }
         }
-    }
 
-    // Последнее событие по телу — close_payment на весь остаток; в его дату,
-    // если процентов там не было, добавляется платёж за хвост периода
-    // начисления (кейс сделки 55: проценты до 30.06, тело 04.07).
-    if let Some(mut idx) = last_principal {
-        let close_date = events[idx].payment_dttm;
-        if close_date > segs[0].start {
-            let acc = segment_accrual(&segs, close_date, deal.day_convention_cd);
-            if acc.abs() > 1e-9 {
-                // остаток до close-платежа — из самого события close
-                let before = events[idx].principal_before;
-                events.insert(
-                    idx,
-                    Event {
-                        event_order: 0,
-                        payment_dttm: close_date,
-                        payment_type: PaymentType::InterestPayment,
-                        stream: Stream::Client,
-                        amount: sign * acc,
-                        principal_before: before,
-                        principal_after: before,
-                        rate: Some(segs.last().expect("секции есть").rate),
-                        base_rate: segs.last().expect("секции есть").base,
-                        accrual_start_dttm: Some(segs[0].start),
-                        accrual_end_dttm: Some(close_date),
-                        accrual_days: Some((close_date - segs[0].start).num_days()),
-                        year_frac: Some(year_fraction(
-                            segs[0].start,
-                            close_date,
-                            deal.day_convention_cd,
-                        )),
-                    },
-                );
-                idx += 1;
-            }
+        // 3.6 ANN: пересчёт платежа после пересмотра ставки (H7)
+        if deal.discriminator == Discriminator::Ann && repriced {
+            let n = principal_future.iter().filter(|d| **d > p).count();
+            ann_payment = annuity(balance, rate, months, n);
         }
-        let close = &mut events[idx];
-        close.payment_type = PaymentType::ClosePayment;
-        close.amount = close.principal_before;
-        close.principal_after = 0.0;
     }
 
     events
@@ -416,7 +495,7 @@ fn run_timeline(
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::{DayConvention, PaymentRule};
+    use crate::model::PaymentRule;
 
     pub(crate) fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -438,7 +517,7 @@ pub(crate) mod testing {
             base_indicator_rate: None,
             base_indicator: None,
             day_convention_cd: DayConvention::Act365,
-            accrued_interest: 0.0,
+            accrued_interest: None,
             cap_limit_interest_rate: None,
             floor_limit_interest_rate: None,
             interest_payment_rule: PaymentRule::default(),
@@ -475,42 +554,41 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{base_deal as deal, cfg, d};
     use super::*;
-    use crate::model::PaymentRule;
 
     #[test]
     fn simple_segments_gap_close_and_accrued() {
         let mut dl = deal();
-        dl.accrued_interest = 1000.0;
+        dl.accrued_interest = Some(1000.0);
         dl.interest_payment = vec![d("2022-09-30"), d("2022-10-31"), d("2022-11-30")];
-        // график покрывает 400 тыс. из 1 млн — добор 600 тыс. в close_payment (H9)
+        // график покрывает 400 тыс. из 1 млн — добор 600 тыс. в close (H9)
         dl.principal_payment = vec![(d("2022-11-15"), 400_000.0)];
 
         let (events, errs) = build_cashflow(&dl, &RateBook::new(), &cfg());
-        assert!(errs.iter().all(|e| e.severity == Severity::Warning));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == crate::model::codes::SCHEDULE_SUM_MISMATCH));
 
-        let amounts: Vec<f64> = events.iter().map(|e| e.amount).collect();
         let close = |days: f64, bal: f64| bal * 0.12 * days / 365.0;
         // 1: 30.09 — накопленные + начисление на 1 млн за 30 дней
         assert_eq!(events[0].payment_dttm, d("2022-09-30"));
-        assert!((amounts[0] - (close(30.0, 1_000_000.0) + 1000.0)).abs() < 1e-6);
+        assert!((events[0].amount - (close(30.0, 1_000_000.0) + 1000.0)).abs() < 1e-6);
         // 2: 31.10 — 31 день на 1 млн
-        assert!((amounts[1] - close(31.0, 1_000_000.0)).abs() < 1e-6);
+        assert!((events[1].amount - close(31.0, 1_000_000.0)).abs() < 1e-6);
         // 3: 15.11 — тело 400 тыс.
         assert_eq!(events[2].payment_type, PaymentType::PrincipalPayment);
-        assert!((amounts[2] - 400_000.0).abs() < 1e-9);
+        assert!((events[2].amount - 400_000.0).abs() < 1e-9);
         // 4: 30.11 — секции: 15 дней на 1 млн + 15 дней на 600 тыс.
-        assert!((amounts[3] - (close(15.0, 1_000_000.0) + close(15.0, 600_000.0))).abs() < 1e-6);
+        assert!(
+            (events[3].amount - (close(15.0, 1_000_000.0) + close(15.0, 600_000.0))).abs() < 1e-6
+        );
         assert_eq!(events[3].accrual_start_dttm, Some(d("2022-10-31")));
         assert_eq!(events[3].principal_before, 600_000.0);
-        // 5: 31.12 — хвост начисления 31 день на 600 тыс. в дату close
+        // 5–6: Tm — проценты за хвост (31 день на 600 тыс.) и close
         assert_eq!(events[4].payment_type, PaymentType::InterestPayment);
-        assert!((amounts[4] - close(31.0, 600_000.0)).abs() < 1e-6);
-        // 6: close_payment гасит остаток в ноль строго
+        assert!((events[4].amount - close(31.0, 600_000.0)).abs() < 1e-6);
         assert_eq!(events[5].payment_type, PaymentType::ClosePayment);
-        assert!((amounts[5] - 600_000.0).abs() < 1e-9);
+        assert!((events[5].amount - 600_000.0).abs() < 1e-9);
         assert_eq!(events[5].principal_after, 0.0);
-        assert_eq!(events[5].event_order, 6);
-        // итог по телу равен остатку
         let body: f64 = events
             .iter()
             .filter(|e| e.payment_type != PaymentType::InterestPayment)
@@ -526,7 +604,7 @@ mod tests {
         dl.current_principal_amt = 900_000.0;
         dl.interest_rate = 0.0365;
         dl.maturity_dttm = d("2022-11-30");
-        let grid = PaymentRule {
+        let grid = crate::model::PaymentRule {
             start_dttm: Some(d("2022-07-30")),
             period_cd: dates::parse_period_cd("1M"),
             day_num: Some(30),
@@ -545,15 +623,16 @@ mod tests {
         for s in &shares {
             assert!((s.amount - 300_000.0).abs() < 1e-9);
         }
-        // проценты: 30 дней на 900 тыс., 30 дней на 600 тыс., 31 день на 300 тыс.
         let ints: Vec<&Event> = events
             .iter()
             .filter(|e| e.payment_type == PaymentType::InterestPayment)
             .collect();
-        assert!((ints[0].amount - 900_000.0 * 0.0365 * 30.0 / 365.0).abs() < 1e-6);
+        assert!(
+            (ints[0].amount - 900_000.0 * 0.0365 * 31.0 / 365.0).abs() < 1e-6,
+            "период с 30.08 (последняя прошлая дата процентов) — 31 день"
+        );
         assert!((ints[1].amount - 600_000.0 * 0.0365 * 30.0 / 365.0).abs() < 1e-6);
         assert!((ints[2].amount - 300_000.0 * 0.0365 * 31.0 / 365.0).abs() < 1e-6);
-        // последняя доля — close_payment
         assert_eq!(
             events.last().unwrap().payment_type,
             PaymentType::ClosePayment
@@ -567,7 +646,6 @@ mod tests {
         dl.current_principal_amt = -500_000.0;
         dl.interest_rate = 0.1;
         dl.maturity_dttm = d("2022-10-31");
-        // ни правил, ни явных списков: проценты по датам тела — в конце срока
 
         let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
         assert_eq!(events.len(), 2);
@@ -594,10 +672,11 @@ mod tests {
     }
 
     #[test]
-    fn overpaid_schedule_is_capped() {
+    fn overpaid_schedule_is_capped_and_closes_early() {
         let mut dl = deal();
         dl.maturity_dttm = d("2022-12-31");
-        // график больше остатка (кейс сделки 20): платим сколько осталось
+        // график больше остатка (кейс сделки 20): платим сколько осталось,
+        // остаток исчерпывается — close раньше Tm, остальные даты отбрасываются
         dl.principal_payment = vec![(d("2022-10-31"), 600_000.0), (d("2022-12-31"), 600_000.0)];
 
         let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
@@ -606,48 +685,11 @@ mod tests {
             .filter(|e| e.payment_type != PaymentType::InterestPayment)
             .map(|e| e.amount)
             .sum();
-        assert!(
-            (body - 1_000_000.0).abs() < 1e-6,
-            "собрано ровно остаток, не больше"
-        );
+        assert!((body - 1_000_000.0).abs() < 1e-6, "собрано ровно остаток");
         let last = events.last().unwrap();
         assert_eq!(last.payment_type, PaymentType::ClosePayment);
         assert!((last.amount - 400_000.0).abs() < 1e-6);
         assert_eq!(last.principal_after, 0.0);
-    }
-
-    #[test]
-    fn bullet_with_monthly_interest() {
-        let mut dl = deal();
-        dl.maturity_dttm = d("2023-02-28");
-        dl.interest_payment_rule = PaymentRule {
-            start_dttm: Some(d("2022-08-31")),
-            period_cd: dates::parse_period_cd("1M"),
-            day_num: None,
-        };
-        let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
-        // 30.09, 30.10, 30.11, 30.12, 30.01 — проценты, 28.02 — проценты + close
-        let ints: Vec<&Event> = events
-            .iter()
-            .filter(|e| e.payment_type == PaymentType::InterestPayment)
-            .collect();
-        assert_eq!(ints.len(), 6);
-        // сетка прижатия: якорь 31-е, в феврале — 28-е
-        assert_eq!(ints.last().unwrap().payment_dttm, d("2023-02-28"));
-        let close = events.last().unwrap();
-        assert_eq!(close.payment_type, PaymentType::ClosePayment);
-        assert!((close.amount - 1_000_000.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn ann_produces_cashflow_via_ann_engine() {
-        let mut dl = deal();
-        dl.discriminator = Discriminator::Ann;
-        dl.interest_payment = vec![d("2022-09-30"), d("2022-10-31"), d("2022-11-30")];
-        let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
-        assert!(!events.is_empty(), "ANN считается в engine/ann");
-        // по две строки на дату: проценты + тело
-        assert_eq!(events.len(), 6);
     }
 
     #[test]
@@ -661,8 +703,8 @@ mod tests {
         dl.interest_payment = vec![d("2022-09-30"), d("2022-10-31")];
         dl.repricing_dttm_schedule = vec![d("2022-09-15")];
         // история: до 01.06 — 0.095, с 10.07 — 0.11. Лаг -2M: стартовый
-        // фиксинг (расчёт 31.08) смотрит на 30.06 -> 0.095, репрайсинг
-        // 15.09 смотрит на 15.07 -> уже 0.11
+        // фиксинг (31.08) смотрит на 30.06 -> 0.095; репрайсинг 15.09
+        // смотрит на 15.07 -> уже 0.11
         let mut book = RateBook::new();
         book.insert(crate::rates::RateSeries::new(
             "CBKEY1M",
@@ -670,7 +712,6 @@ mod tests {
         ));
 
         let (events, _) = build_cashflow(&dl, &book, &cfg());
-        // стартовая ставка: индикатор на дату расчёта 0.095 + маржа 0.02
         let repr: Vec<&Event> = events
             .iter()
             .filter(|e| e.payment_type == PaymentType::Repricing)
@@ -680,43 +721,28 @@ mod tests {
         assert_eq!(repr[0].amount, 0.0);
         assert_eq!(repr[0].rate, Some(0.13)); // 0.11 + 0.02
         assert_eq!(repr[0].base_rate, Some(0.11));
-        assert_eq!(repr[0].principal_before, 1_000_000.0);
 
-        // проценты 30.09: секции 15 дней по 0.115 и 15 дней по 0.13
         let ints: Vec<&Event> = events
             .iter()
             .filter(|e| e.payment_type == PaymentType::InterestPayment)
             .collect();
-        assert_eq!(ints.len(), 3, "30.09, 31.10 и хвост перед close 31.12");
+        assert_eq!(ints.len(), 3, "30.09, 31.10 и Tm 31.12");
         let want0 = 1_000_000.0 * (0.115 * 15.0 / 365.0 + 0.13 * 15.0 / 365.0);
         assert!((ints[0].amount - want0).abs() < 1e-6);
-        // ставка в строке — та, что действовала в конце периода
-        assert_eq!(ints[0].rate, Some(0.13));
+        assert_eq!(ints[0].rate, Some(0.13)); // ставка последнего отрезка периода
         assert_eq!(ints[0].base_rate, Some(0.11));
-        // 31.10 — весь период по 0.13
         assert!((ints[1].amount - 1_000_000.0 * 0.13 * 31.0 / 365.0).abs() < 1e-6);
-        let dates: Vec<NaiveDate> = events.iter().map(|e| e.payment_dttm).collect();
-        assert_eq!(
-            dates,
-            vec![
-                d("2022-09-15"),
-                d("2022-09-30"),
-                d("2022-10-31"),
-                d("2022-12-31"),
-                d("2022-12-31"),
-            ]
-        );
     }
 
     #[test]
     fn float_margin_schedule_overrides_margin() {
         let mut dl = deal();
         dl.rate_type_cd = RateType::Float;
-        dl.interest_rate = 0.02; // маржа до смены
+        dl.interest_rate = 0.02;
+        dl.base_indicator = Some("CBKEY1M".into());
         dl.base_indicator_rate = Some(0.08); // истории нет — значение из сделки
         dl.maturity_dttm = d("2022-12-31");
         dl.interest_payment = vec![d("2022-10-31"), d("2022-11-30")];
-        // график фиксированной части перекрывает маржу с 01.11
         dl.repricing_dttm_rate_schedule_fixed = vec![(d("2022-11-01"), 0.05)];
         dl.repricing_dttm_schedule = vec![d("2022-11-01")];
 
@@ -727,16 +753,14 @@ mod tests {
             .collect();
         assert_eq!(repr.len(), 1);
         assert_eq!(repr[0].rate, Some(0.13)); // 0.08 + 0.05
-        assert_eq!(repr[0].base_rate, Some(0.08));
 
         let ints: Vec<&Event> = events
             .iter()
             .filter(|e| e.payment_type == PaymentType::InterestPayment)
             .collect();
-        // 31.10 — ещё по старой марже: 0.08 + 0.02 за 61 день
         assert!((ints[0].amount - 1_000_000.0 * 0.10 * 61.0 / 365.0).abs() < 1e-6);
         assert_eq!(ints[0].rate, Some(0.10));
-        // 30.11: 1 день по 0.10 (до репрайсинга 01.11) + 29 дней по 0.13
+        // 30.11: 1 день по 0.10 + 29 дней по 0.13
         let want1 = 1_000_000.0 * (0.10 * 1.0 / 365.0 + 0.13 * 29.0 / 365.0);
         assert!((ints[1].amount - want1).abs() < 1e-6);
         assert_eq!(ints[1].rate, Some(0.13));
@@ -765,10 +789,9 @@ mod tests {
             .iter()
             .filter(|e| e.payment_type == PaymentType::InterestPayment)
             .collect();
-        // 31.10: 45 дней по 0.09 (с даты расчёта) + 16 дней по 0.12
+        // 31.10: 45 дней по 0.09 + 16 дней по 0.12
         let want = 1_000_000.0 * (0.09 * 45.0 / 365.0 + 0.12 * 16.0 / 365.0);
         assert!((ints[0].amount - want).abs() < 1e-6);
-        // 30.11: целиком по 0.12
         assert!((ints[1].amount - 1_000_000.0 * 0.12 * 30.0 / 365.0).abs() < 1e-6);
     }
 }

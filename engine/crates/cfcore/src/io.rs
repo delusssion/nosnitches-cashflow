@@ -268,7 +268,7 @@ fn parse_deal_row(rec: &StringRecord, pos: &[usize; 48]) -> Result<Deal, String>
         base_indicator_rate: opt_f64(g(10), "base_indicator_rate")?,
         base_indicator: opt_str(g(11)),
         day_convention_cd: day_convention,
-        accrued_interest: opt_f64(g(22), "accrued_interest")?.unwrap_or(0.0),
+        accrued_interest: opt_f64(g(22), "accrued_interest")?,
         cap_limit_interest_rate: opt_f64(g(30), "cap_limit_interest_rate")?,
         floor_limit_interest_rate: opt_f64(g(31), "floor_limit_interest_rate")?,
 
@@ -447,15 +447,15 @@ impl<W: Write> CashflowWriter<W> {
                 e.payment_dttm.to_string(),
                 e.payment_type.as_str().to_string(),
                 e.stream.as_str().to_string(),
-                format!("{:.2}", e.amount),
-                format!("{:.2}", e.principal_before),
-                format!("{:.2}", e.principal_after),
-                fmt_opt_f64(e.rate),
-                fmt_opt_f64(e.base_rate),
+                fmt_money(e.amount),
+                fmt_money(e.principal_before),
+                fmt_money(e.principal_after),
+                e.rate.map(fmt_rate10).unwrap_or_default(),
+                e.base_rate.map(fmt_rate10).unwrap_or_default(),
                 fmt_opt_date(e.accrual_start_dttm),
                 fmt_opt_date(e.accrual_end_dttm),
                 e.accrual_days.map(|d| d.to_string()).unwrap_or_default(),
-                fmt_opt_f64(e.year_frac),
+                e.year_frac.map(|v| format!("{v:.10}")).unwrap_or_default(),
                 deal.discriminator.as_str().to_string(),
             ])?;
         }
@@ -478,8 +478,25 @@ pub fn write_errors_csv<W: Write>(w: W, errors: &[DealError]) -> csv::Result<()>
     Ok(())
 }
 
-fn fmt_opt_f64(v: Option<f64>) -> String {
-    v.map(|x| x.to_string()).unwrap_or_default()
+/// Деньги: два знака, минус-ноль не выводим (формат эталонов).
+fn fmt_money(v: f64) -> String {
+    let s = format!("{v:.2}");
+    if s == "-0.00" {
+        "0.00".to_string()
+    } else {
+        s
+    }
+}
+
+/// Ставка/индикатор: округление до 10 знаков, хвостовые нули срезаны.
+fn fmt_rate10(v: f64) -> String {
+    let s = format!("{v:.10}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-0" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn fmt_opt_date(v: Option<NaiveDate>) -> String {

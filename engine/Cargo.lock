@@ -112,6 +112,7 @@ dependencies = [
  "anyhow",
  "cfcore",
  "clap",
+ "csv",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! cfgen — CLI калькулятора денежных потоков поверх библиотеки cfcore.
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -60,16 +60,133 @@ fn main() -> Result<()> {
             result,
             golden_dir,
             tolerance,
-        } => {
-            bail!(
-                "сверка будет реализована в ветке engine/verify \
-                 (result={}, golden_dir={}, допуск {:.2} ₽)",
-                result.display(),
-                golden_dir.display(),
-                tolerance
-            )
+        } => verify(&result, &golden_dir, tolerance),
+    }
+}
+
+/// Сверка результата прогона с эталонами (формат 4 контракта): по ключу
+/// `deal_id + payment_dttm + payment_type + stream`, допуск по amount и
+/// principal_after. Код возврата 1 при расхождениях — удобно для CI.
+fn verify(result_path: &Path, golden_dir: &Path, tolerance: f64) -> Result<()> {
+    let result = read_cashflow(result_path)?;
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    let entries = std::fs::read_dir(golden_dir)
+        .with_context(|| format!("каталог эталонов {}", golden_dir.display()))?;
+    let mut golden_paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "csv"))
+        .collect();
+    golden_paths.sort();
+
+    for path in &golden_paths {
+        let deal_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .trim_start_matches("deal_")
+            .to_string();
+        let golden = read_cashflow(path)?;
+        let got: Vec<_> = result.iter().filter(|r| r.deal_id == deal_id).collect();
+        if got.len() != golden.len() {
+            failures.push(format!(
+                "сделка {deal_id}: строк {} против эталона {}",
+                got.len(),
+                golden.len()
+            ));
+            continue;
+        }
+        let mut diffs: Vec<String> = Vec::new();
+        for (g, w) in got.iter().zip(golden.iter()) {
+            if g.key != w.key {
+                diffs.push(format!(
+                    "  строка {}: ключ {} ≠ эталону {}",
+                    g.event_order, g.key, w.key
+                ));
+                continue;
+            }
+            if (g.amount - w.amount).abs() > tolerance {
+                diffs.push(format!(
+                    "  {}: amount {:.2} ≠ эталону {:.2}",
+                    g.key, g.amount, w.amount
+                ));
+            }
+            if (g.principal_after - w.principal_after).abs() > tolerance {
+                diffs.push(format!(
+                    "  {}: principal_after {:.2} ≠ эталону {:.2}",
+                    g.key, g.principal_after, w.principal_after
+                ));
+            }
+        }
+        checked += 1;
+        if diffs.is_empty() {
+            println!("сделка {deal_id}: OK ({} строк)", golden.len());
+        } else {
+            failures.push(format!("сделка {deal_id}:\n{}", diffs.join("\n")));
         }
     }
+
+    if failures.is_empty() {
+        println!("Сверка пройдена: {checked} эталон(ов), допуск {tolerance:.2} ₽");
+        Ok(())
+    } else {
+        for f in &failures {
+            eprintln!("{f}");
+        }
+        bail!("расхождения с эталонами в {} сделках", failures.len());
+    }
+}
+
+struct CashRow {
+    deal_id: String,
+    event_order: String,
+    key: String,
+    amount: f64,
+    principal_after: f64,
+}
+
+fn read_cashflow(path: &Path) -> Result<Vec<CashRow>> {
+    let file = File::open(path).with_context(|| format!("чтение {}", path.display()))?;
+    let mut rdr = csv::Reader::from_reader(BufReader::new(file));
+    let header: Vec<String> = rdr
+        .headers()
+        .with_context(|| format!("заголовок {}", path.display()))?
+        .iter()
+        .map(String::from)
+        .collect();
+    let idx = |name: &str| {
+        header
+            .iter()
+            .position(|h| h == name)
+            .with_context(|| format!("в {} нет колонки {name}", path.display()))
+    };
+    let (i_deal, i_ord, i_day, i_type, i_stream) = (
+        idx("deal_id")?,
+        idx("event_order")?,
+        idx("payment_dttm")?,
+        idx("payment_type")?,
+        idx("stream")?,
+    );
+    let (i_amount, i_after) = (idx("amount")?, idx("principal_after")?);
+
+    let mut rows = Vec::new();
+    for rec in rdr.records() {
+        let r = rec.with_context(|| format!("строка {}", path.display()))?;
+        rows.push(CashRow {
+            deal_id: r.get(i_deal).unwrap_or("").to_string(),
+            event_order: r.get(i_ord).unwrap_or("").to_string(),
+            key: format!(
+                "{}|{}|{}",
+                r.get(i_day).unwrap_or(""),
+                r.get(i_type).unwrap_or(""),
+                r.get(i_stream).unwrap_or("")
+            ),
+            amount: r.get(i_amount).unwrap_or("").parse().unwrap_or(f64::NAN),
+            principal_after: r.get(i_after).unwrap_or("").parse().unwrap_or(f64::NAN),
+        });
+    }
+    Ok(rows)
 }
 
 fn run(deals_path: &Path, rates_path: &Path, out_dir: &Path) -> Result<()> {
