@@ -1,0 +1,26 @@
+name: gen-portfolio
+
+on:
+  push:
+    branches: [main]
+    paths: ['tools/gen-portfolio/**', '.github/workflows/gen-portfolio.yml']
+  pull_request:
+    paths: ['tools/gen-portfolio/**', '.github/workflows/gen-portfolio.yml']
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/gen-portfolio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/gen-portfolio/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run gen -- --n 10000 --out /tmp/deals.csv
