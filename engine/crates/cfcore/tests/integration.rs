@@ -119,3 +119,42 @@ fn repo_samples_parse() {
         );
     }
 }
+
+/// Инварианты движка на краевых фикстурах: тело собирается ровно в остаток,
+/// close_payment гасит в ноль, депозит отрицательный, ANN — заглушка.
+#[test]
+fn engine_invariants_on_edge_fixtures() {
+    use cfcore::model::PaymentType;
+
+    let deals = edge_deals();
+    let book = edge_rates();
+    let cfg = Config::default();
+
+    // T-GAP-4: график 850 000 из 1 000 000 -> добор в close_payment (H9)
+    let (events, _) = build_cashflow(&deals[3], &book, &cfg);
+    assert!(!events.is_empty());
+    let body: f64 = events
+        .iter()
+        .filter(|e| e.payment_type != PaymentType::InterestPayment)
+        .map(|e| e.amount)
+        .sum();
+    assert!((body - 1_000_000.0).abs() < 0.01);
+    let last = events.last().unwrap();
+    assert_eq!(last.payment_type, PaymentType::ClosePayment);
+    assert_eq!(last.principal_after, 0.0);
+
+    // T-DEP-2: депозит — все суммы отрицательные, close гасит в ноль
+    let (events, _) = build_cashflow(&deals[1], &book, &cfg);
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e.amount <= 0.0));
+    assert_eq!(events.last().unwrap().principal_after, 0.0);
+
+    // USD-сделка не считается вовсе
+    let (events, errs) = build_cashflow(&deals[2], &book, &cfg);
+    assert!(events.is_empty());
+    assert!(errs.iter().any(|e| e.severity == Severity::Error));
+
+    // ANN — заглушка до ветки engine/ann
+    let (events, _) = build_cashflow(&deals[0], &book, &cfg);
+    assert!(events.is_empty());
+}

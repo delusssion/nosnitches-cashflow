@@ -36,13 +36,14 @@ pub fn validate(deal: &Deal) -> Vec<DealError> {
         });
     }
 
-    // H9: явный график тела против остатка. Прошлые даты графика (<= report_dttm)
-    // уже не влияют на остаток, в сверку идут только будущие.
+    // H9: явный график тела против остатка. В сверку идут будущие платежи
+    // графика (<= report_dttm — прошлое, > maturity — за сроком сделки),
+    // ровно те же, что учитывает движок.
     if !deal.principal_payment.is_empty() {
         let future: f64 = deal
             .principal_payment
             .iter()
-            .filter(|(d, _)| *d > deal.report_dttm)
+            .filter(|(d, _)| *d > deal.report_dttm && *d <= deal.maturity_dttm)
             .map(|(_, a)| a)
             .sum();
         let balance = deal.current_principal_amt.abs();

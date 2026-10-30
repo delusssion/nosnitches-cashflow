@@ -53,6 +53,19 @@ impl RateSeries {
         self.value_on(dates::add_months(date, lag_months)) + shift
     }
 
+    /// Значение индикатора для фиксинга на дату `at` с лагом `lag_months`.
+    /// Смотр не дальше даты расчёта `report`: для будущих дат берётся
+    /// последнее известное на дату расчёта + сдвиг сценария (H3) — история
+    /// после даты расчёта не «подглядывается».
+    pub fn fixing(&self, at: NaiveDate, lag_months: i32, report: NaiveDate, shift: f64) -> f64 {
+        let look = dates::add_months(at, lag_months);
+        if look >= report {
+            self.value_on(report) + shift
+        } else {
+            self.value_on(look)
+        }
+    }
+
     /// Первый и последний шаг серии (для сводки прогона).
     pub fn span(&self) -> Option<(NaiveDate, NaiveDate)> {
         match (self.steps.first(), self.steps.last()) {
@@ -155,6 +168,21 @@ mod tests {
         // на 2022-10-01 действует шаг 2022-09-19 (0.075) + сдвиг 0.01
         let r = s.rate_with(d("2022-10-01"), 0, 0.01);
         assert!((r - 0.085).abs() < 1e-12); // без бит-в-бит: 0.075 + 0.01 в f64
+    }
+
+    #[test]
+    fn fixing_never_looks_past_report_date() {
+        let s = series(); // шаги: 2022-02-28 (0.095), 2022-09-19 (0.075)
+        let report = d("2022-08-31");
+        // будущее заморожено на значении даты расчёта: без клампа
+        // фиксинг 2022-10-01 увидел бы шаг 2022-09-19 (0.075)
+        assert_eq!(s.fixing(d("2022-10-01"), 0, report, 0.0), 0.095);
+        assert_eq!(s.fixing(d("2026-01-01"), 0, report, 0.0), 0.095);
+        // лаг уводит смотр в прошлое — реальная история до даты расчёта
+        assert_eq!(s.fixing(d("2022-10-01"), -1, report, 0.0), 0.095); // смотр 2022-09-01
+                                                                       // сдвиг сценария применяется только к будущему
+        let r = s.fixing(d("2022-10-01"), 0, report, 0.01);
+        assert!((r - 0.105).abs() < 1e-12);
     }
 
     #[test]
