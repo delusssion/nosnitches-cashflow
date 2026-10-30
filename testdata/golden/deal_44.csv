@@ -1,0 +1,9 @@
+report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principal_before,principal_after,rate,base_rate,accrual_start_dttm,accrual_end_dttm,accrual_days,year_frac,discriminator
+2022-08-31,44,1,2022-09-30,interest_payment,client,1658.50,224204.19,224204.19,0.09,,2022-08-31,2022-09-30,30,0.0821917808,SIMPLE
+2022-08-31,44,2,2022-09-30,principal_payment,client,55424.40,224204.19,168779.79,0.09,,,,,,SIMPLE
+2022-08-31,44,3,2022-10-31,interest_payment,client,1290.12,168779.79,168779.79,0.09,,2022-09-30,2022-10-31,31,0.0849315068,SIMPLE
+2022-08-31,44,4,2022-10-31,principal_payment,client,55840.08,168779.79,112939.71,0.09,,,,,,SIMPLE
+2022-08-31,44,5,2022-11-30,interest_payment,client,835.44,112939.71,112939.71,0.09,,2022-10-31,2022-11-30,30,0.0821917808,SIMPLE
+2022-08-31,44,6,2022-11-30,principal_payment,client,56258.88,112939.71,56680.83,0.09,,,,,,SIMPLE
+2022-08-31,44,7,2022-12-30,interest_payment,client,419.28,56680.83,56680.83,0.09,,2022-11-30,2022-12-30,30,0.0821917808,SIMPLE
+2022-08-31,44,8,2022-12-30,close_payment,client,56680.83,56680.83,0.00,0.09,,,,,,SIMPLE
