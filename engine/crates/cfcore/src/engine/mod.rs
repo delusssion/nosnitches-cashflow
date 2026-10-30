@@ -306,16 +306,18 @@ fn run_timeline(
     events
 }
 
+/// Общие хелперы тестов движков (base_deal меняется в каждом тесте).
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use crate::model::{DayConvention, PaymentRule};
 
-    fn d(s: &str) -> NaiveDate {
+    pub(crate) fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
     }
 
-    fn deal() -> Deal {
+    /// Минимальная корректная рублёвая FIXED-сделка; тесты меняют поля.
+    pub(crate) fn base_deal() -> Deal {
         Deal {
             report_dttm: d("2022-08-31"),
             discriminator: Discriminator::Simple,
@@ -358,9 +360,16 @@ mod tests {
         }
     }
 
-    fn cfg() -> Config {
+    pub(crate) fn cfg() -> Config {
         Config::default()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{base_deal as deal, cfg, d};
+    use super::*;
+    use crate::model::PaymentRule;
 
     #[test]
     fn simple_segments_gap_close_and_accrued() {
@@ -525,10 +534,13 @@ mod tests {
     }
 
     #[test]
-    fn ann_is_stub_until_engine_ann() {
+    fn ann_produces_cashflow_via_ann_engine() {
         let mut dl = deal();
         dl.discriminator = Discriminator::Ann;
+        dl.interest_payment = vec![d("2022-09-30"), d("2022-10-31"), d("2022-11-30")];
         let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
-        assert!(events.is_empty(), "ANN появится в ветке engine/ann");
+        assert!(!events.is_empty(), "ANN считается в engine/ann");
+        // по две строки на дату: проценты + тело
+        assert_eq!(events.len(), 6);
     }
 }

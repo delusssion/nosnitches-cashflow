@@ -154,7 +154,24 @@ fn engine_invariants_on_edge_fixtures() {
     assert!(events.is_empty());
     assert!(errs.iter().any(|e| e.severity == Severity::Error));
 
-    // ANN — заглушка до ветки engine/ann
+    // T-ANN-1: аннуитет — по две строки на дату, close гасит в ноль
     let (events, _) = build_cashflow(&deals[0], &book, &cfg);
-    assert!(events.is_empty());
+    assert!(!events.is_empty());
+    assert!(events.len() % 2 == 0);
+    for pair in events.chunks(2) {
+        assert_eq!(pair[0].payment_type, PaymentType::InterestPayment);
+        assert!(matches!(
+            pair[1].payment_type,
+            PaymentType::PrincipalPayment | PaymentType::ClosePayment
+        ));
+    }
+    let body: f64 = events
+        .iter()
+        .filter(|e| e.payment_type != PaymentType::InterestPayment)
+        .map(|e| e.amount)
+        .sum();
+    assert!((body - 1_000_000.0).abs() < 0.01);
+    let last = events.last().unwrap();
+    assert_eq!(last.payment_type, PaymentType::ClosePayment);
+    assert_eq!(last.principal_after, 0.0);
 }
