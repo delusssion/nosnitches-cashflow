@@ -46,7 +46,7 @@ def test_invariants(i):
 def test_usd_rejected():
     with pytest.raises(DealError) as e:
         run(32)
-    assert e.value.code == "CURRENCY_NOT_RUB"
+    assert e.value.code == "UNSUPPORTED_CURRENCY"
 
 
 def test_deal_1_control_isda():
@@ -98,7 +98,7 @@ def test_subsidy():
 
 def test_schedule_mismatch_warning():
     _, warnings = generate_with_warnings(DEALS[20], KEY_RATE, REPORT)
-    assert [w[0] for w in warnings] == ["PRINCIPAL_SUM_MISMATCH"]
+    assert [w[0] for w in warnings] == ["SCHEDULE_SUM_MISMATCH"]
     events = run(54)
     close = [e for e in events if e["payment_type"] == "close_payment"][0]
     assert close["payment_dttm"] == dt.date(2029, 10, 11)

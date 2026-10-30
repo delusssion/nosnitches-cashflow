@@ -14,7 +14,7 @@
 | 1 | `report_dttm` | Дата расчёта $T_0$ | дата | да | граница прошлое / будущее (§2.4) | 2022-08-31 |
 | 2 | `discriminator` | Способ погашения тела | ANN / RGM / SIMPLE | да | выбор алгоритма (§5) | ANN (1) |
 | 3 | `deal_id` | Номер сделки | строка | да | ключ выхода | 1 |
-| 4 | `currency_id` | Валюта | код | да | не RUB → ошибка `CURRENCY_NOT_RUB` | RUB; USD (32) |
+| 4 | `currency_id` | Валюта | код | да | не RUB → ошибка `UNSUPPORTED_CURRENCY` | RUB; USD (32) |
 | 5 | `start_principal_amt` | Первоначальная сумма | число | нет | не используется (Q12) | 500000 (25) |
 | 6 | `current_principal_amt` | Остаток тела на $T_0$, со знаком | число | да | $B$ — база всех расчётов | 3646037.89 (1); −1896648.88 (15) |
 | 7 | `deal_dttm` | Дата начала сделки | дата | да | начало первого периода, если прошлых выплат нет; нижняя граница фиксинга ставки | 2020-06-22 (1) |
@@ -179,7 +179,7 @@ P ← B / n
 
 ### 5.3 SIMPLE — по графику или в конце
 
-- Есть `principal_payment`: платим будущие суммы графика (даты $> T_0$), но не больше остатка. В $T_m$ — `close_payment` на весь остаток. Если сумма будущего графика $\ne B$ — разница уходит в `close_payment` и пишется warning `PRINCIPAL_SUM_MISMATCH` (H9). Сделка 54: график 850 085,26 из 9 020 721,21 — 8 170 635,95 гасится в 2029-10-11.
+- Есть `principal_payment`: платим будущие суммы графика (даты $> T_0$), но не больше остатка. В $T_m$ — `close_payment` на весь остаток. Если сумма будущего графика $\ne B$ — разница уходит в `close_payment` и пишется warning `SCHEDULE_SUM_MISMATCH` (H9). Сделка 54: график 850 085,26 из 9 020 721,21 — 8 170 635,95 гасится в 2029-10-11.
 - Нет графика (ENDDATE или пусто): всё тело — `close_payment` в $T_m$.
 
 ```
@@ -237,7 +237,7 @@ $k$ = `sub_coeff_index` (пусто → 1), $s$ = `sub_interest_rate`, зате�
 | `base_rate` | индикатор для FLOAT, иначе пусто |
 | `accrual_start_dttm` / `end_dttm`, `accrual_days`, `year_frac` | для `interest_payment` / `sub_payment`: период $(a, b]$, дни $b - a$, $\tau(a, b)$ |
 
-Суммы в файле округлены до 2 знаков; внутри расчёта округления нет. Ошибки — `errors.csv` (`deal_id,severity,code,field,message`): USD → `error CURRENCY_NOT_RUB`; расхождение графика → `warning PRINCIPAL_SUM_MISMATCH`; FLOAT без пересмотров → `warning FLOAT_NO_REPRICING`.
+Суммы в файле округлены до 2 знаков; внутри расчёта округления нет. Ошибки — `errors.csv` (`deal_id,severity,code,field,message`): USD → `error UNSUPPORTED_CURRENCY`; погашение не позже даты расчёта → `error MATURITY_BEFORE_REPORT`; неизвестный discriminator → `error UNKNOWN_DISCRIMINATOR`; расхождение графика → `warning SCHEDULE_SUM_MISMATCH`; FLOAT без пересмотров → `warning FLOAT_NO_REPRICING`.
 
 ## 9. Гипотезы
 
