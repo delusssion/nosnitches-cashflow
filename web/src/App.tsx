@@ -1,13 +1,13 @@
 import { createHashRouter, RouterProvider } from 'react-router';
 import { routes } from './routes';
-import { DataProvider } from './state/DataContext';
+import { Providers } from './state/Providers';
 
 const router = createHashRouter(routes);
 
 export function App() {
   return (
-    <DataProvider>
+    <Providers>
       <RouterProvider router={router} />
-    </DataProvider>
+    </Providers>
   );
 }
