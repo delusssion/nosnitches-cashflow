@@ -1,0 +1,14 @@
+[package]
+name = "cfgen"
+description = "CLI калькулятора денежных потоков поверх cfcore"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "cfgen"
+path = "src/main.rs"
+
+[dependencies]
+cfcore = { path = "../cfcore" }
+anyhow.workspace = true
+clap.workspace = true
