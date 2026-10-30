@@ -32,15 +32,22 @@ testdata/
   samples/             демо-данные для UI (не эталоны)
 ```
 
-## Как запустить web
+## Как запустить просмотрщик
 
 ```bash
 cd web
 npm ci
-npm run dev
+npm run dev        # http://localhost:5173
 ```
 
-Откроется просмотрщик на http://localhost:5173. Кнопка «Загрузить демо» подгружает данные из `testdata/samples/`.
+- **Портфель** — перетащите CSV кэшфлоу (формат 3 контракта) и, по желанию, CSV сделок; кнопка «Загрузить демо» берёт `testdata/samples/`.
+- **Сделка** — параметры, временная шкала событий и остатка, таблица событий, экспорт CSV.
+- **Сверка** — результат движка против эталонов `testdata/golden/`, допуск по умолчанию 0,01 ₽, экспорт отчёта.
+
+Проверки: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
+Сценарий демо и скриншоты: [docs/DEMO.md](docs/DEMO.md), `npx playwright test` (первый раз — `npx playwright install chromium`).
+
+Синтетический портфель для нагрузки: [tools/gen-portfolio](tools/gen-portfolio/README.md).
 
 ## Процесс
 

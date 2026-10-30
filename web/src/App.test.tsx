@@ -1,10 +1,15 @@
 import { render, screen } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { routes } from './routes';
+import { Providers } from './state/Providers';
 
 function renderAt(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] });
-  render(<RouterProvider router={router} />);
+  render(
+    <Providers>
+      <RouterProvider router={router} />
+    </Providers>,
+  );
 }
 
 describe('Layout', () => {
@@ -18,6 +23,12 @@ describe('Layout', () => {
 
   it('открывает экран сверки по маршруту', () => {
     renderAt('/compare');
-    expect(screen.getByRole('heading', { name: 'Сверка' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Сверка с эталоном' })).toBeInTheDocument();
+  });
+
+  it('на портфеле есть зоны загрузки и кнопка демо', () => {
+    renderAt('/');
+    expect(screen.getByText('Перетащите кэшфлоу (CSV)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Загрузить демо' })).toBeInTheDocument();
   });
 });

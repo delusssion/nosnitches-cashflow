@@ -1,0 +1,65 @@
+.ok {
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.bad {
+  color: var(--c-error);
+  font-weight: 600;
+}
+
+.status {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.match {
+  composes: status;
+  background: var(--c-accent-light);
+  color: var(--c-accent);
+}
+
+.diff,
+.missing,
+.extra {
+  composes: status;
+  background: #fbe4e2;
+  color: var(--c-error);
+}
+
+.delta {
+  color: var(--c-error);
+  font-weight: 600;
+}
+
+.tolerance {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tolerance input {
+  width: 90px;
+}
+
+.verdict {
+  font-size: 16px;
+  font-weight: 600;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+}
+
+.verdictOk {
+  composes: verdict;
+  background: var(--c-accent-light);
+  color: var(--c-accent);
+}
+
+.verdictBad {
+  composes: verdict;
+  background: #fbe4e2;
+  color: var(--c-error);
+}
