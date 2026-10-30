@@ -325,10 +325,10 @@ def generate_with_warnings(
 
     # 0. Проверки, при которых сделку не считаем.
     if deal["currency_id"] != "RUB":
-        raise DealError("CURRENCY_NOT_RUB", "currency_id", f"валюта {deal['currency_id']}, считаем только RUB")
+        raise DealError("UNSUPPORTED_CURRENCY", "currency_id", f"валюта {deal['currency_id']}, считаем только RUB")
     disc = deal["discriminator"]
     if disc not in ("ANN", "RGM", "SIMPLE"):
-        raise DealError("BAD_DISCRIMINATOR", "discriminator", f"неизвестный discriminator {disc!r}")
+        raise DealError("UNKNOWN_DISCRIMINATOR", "discriminator", f"неизвестный discriminator {disc!r}")
     if deal["rate_type_cd"] == "FLOAT" and not deal["base_indicator"]:
         raise DealError("FLOAT_NO_INDICATOR", "base_indicator", "FLOAT без индикатора")
 
@@ -340,7 +340,9 @@ def generate_with_warnings(
     ind = Indicator(key_rate, report)
     tau = lambda a, b: year_fraction(convention, a, b)  # noqa: E731
 
-    if not is_future(maturity, report) or balance == 0:
+    if not is_future(maturity, report):
+        raise DealError("MATURITY_BEFORE_REPORT", "maturity_dttm", f"погашение {maturity} не позже даты расчёта")
+    if balance == 0:
         return [], warnings
 
     # 1. Даты.
@@ -364,7 +366,7 @@ def generate_with_warnings(
             total = sum(planned.values())
             if abs(total - balance) > 0.005:
                 warnings.append(
-                    ("PRINCIPAL_SUM_MISMATCH", "principal_payment", f"график {total:.2f} ≠ остатку {balance:.2f} (H9)")
+                    ("SCHEDULE_SUM_MISMATCH", "principal_payment", f"график {total:.2f} ≠ остатку {balance:.2f} (H9)")
                 )
         principal_future = sorted({d for d in planned if d <= maturity} | {maturity})
     else:

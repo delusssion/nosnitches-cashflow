@@ -62,7 +62,7 @@ def profile_deal(d: dict[str, str]) -> list[Finding]:
 
     # Валюта и знак
     if d["currency_id"] != "RUB":
-        add("error", "CURRENCY_NOT_RUB", f"валюта {d['currency_id']} — калькулятор считает только рубли")
+        add("error", "UNSUPPORTED_CURRENCY", f"валюта {d['currency_id']} — калькулятор считает только рубли")
     if cur < 0:
         add("info", "LIABILITY", f"отрицательный остаток {money(cur)} — пассив (депозит)")
     start = num(d["start_principal_amt"])
@@ -86,11 +86,11 @@ def profile_deal(d: dict[str, str]) -> list[Finding]:
         if abs(diff) > EPS:
             add(
                 "warning",
-                "PRINCIPAL_SUM_MISMATCH",
+                "SCHEDULE_SUM_MISMATCH",
                 f"сумма будущего графика тела {money(future_sum)} ≠ остатку {money(cur)} (Δ {money(diff)})",
             )
         elif abs(diff) > 1e-9:
-            add("info", "PRINCIPAL_SUM_ROUNDING", f"график тела отличается от остатка на {money(diff)} (округление)")
+            add("info", "SCHEDULE_SUM_ROUNDING", f"график тела отличается от остатка на {money(diff)} (округление)")
         if max(pdates) < mat:
             add("warning", "PRINCIPAL_ENDS_BEFORE_MATURITY", f"график тела заканчивается {max(pdates)}, погашение {mat}")
         if max(pdates) > mat:
