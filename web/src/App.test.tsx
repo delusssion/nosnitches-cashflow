@@ -1,14 +1,14 @@
 import { render, screen } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { routes } from './routes';
-import { DataProvider } from './state/DataContext';
+import { Providers } from './state/Providers';
 
 function renderAt(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] });
   render(
-    <DataProvider>
+    <Providers>
       <RouterProvider router={router} />
-    </DataProvider>,
+    </Providers>,
   );
 }
 
@@ -23,7 +23,7 @@ describe('Layout', () => {
 
   it('открывает экран сверки по маршруту', () => {
     renderAt('/compare');
-    expect(screen.getByRole('heading', { name: 'Сверка' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Сверка с эталоном' })).toBeInTheDocument();
   });
 
   it('на портфеле есть зоны загрузки и кнопка демо', () => {
