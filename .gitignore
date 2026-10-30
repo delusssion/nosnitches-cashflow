@@ -6,6 +6,8 @@ engine/target/
 __pycache__/
 .venv/
 testdata/synthetic/
+CLAUDE.md
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
+docs/tasks/
 .DS_Store
