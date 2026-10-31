@@ -1,0 +1,11 @@
+[package]
+name = "cfcore"
+description = "Расчётное ядро калькулятора денежных потоков (контракт — docs/CONTRACT.md)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+csv.workspace = true
+serde.workspace = true
+thiserror.workspace = true
