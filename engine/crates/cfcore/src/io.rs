@@ -201,6 +201,10 @@ pub fn parse_deals<R: Read>(rdr: R) -> Result<Vec<Deal>, RowError> {
     for (i, name) in DEAL_COLUMNS.iter().enumerate() {
         pos[i] = col(name)?;
     }
+    let pos_prepay = header.iter().position(|h| {
+        let s = h.trim().trim_start_matches('\u{feff}');
+        s == "prepayment" || s == "prepayment_schedule"
+    });
 
     let mut deals = Vec::new();
     for rec in reader.records() {
@@ -209,7 +213,7 @@ pub fn parse_deals<R: Read>(rdr: R) -> Result<Vec<Deal>, RowError> {
             .position()
             .map(|p| usize::try_from(p.line()).unwrap_or(0))
             .unwrap_or(0);
-        match parse_deal_row(&rec, &pos) {
+        match parse_deal_row(&rec, &pos, pos_prepay) {
             Ok(deal) => deals.push(deal),
             Err(message) => return Err(RowError::Msg { line, message }),
         }
@@ -217,7 +221,11 @@ pub fn parse_deals<R: Read>(rdr: R) -> Result<Vec<Deal>, RowError> {
     Ok(deals)
 }
 
-fn parse_deal_row(rec: &StringRecord, pos: &[usize; 48]) -> Result<Deal, String> {
+fn parse_deal_row(
+    rec: &StringRecord,
+    pos: &[usize; 48],
+    pos_prepay: Option<usize>,
+) -> Result<Deal, String> {
     let g = |i: usize| -> &str { rec.get(pos[i]).unwrap_or("") };
 
     let day_convention = match req_str(g(15), "day_convention_cd")?.as_str() {
@@ -331,6 +339,10 @@ fn parse_deal_row(rec: &StringRecord, pos: &[usize; 48]) -> Result<Deal, String>
         deal_report_dttm: opt_date(g(44), "deal_report_dttm")?,
         indicator_lag_cd: opt_str(g(46)),
         sub_indicator_lag_cd: opt_str(g(47)),
+        prepayment_schedule: match pos_prepay.and_then(|idx| rec.get(idx)) {
+            Some(s) if !s.trim().is_empty() => dates::parse_pairs(s)?,
+            _ => Vec::new(),
+        },
     })
 }
 

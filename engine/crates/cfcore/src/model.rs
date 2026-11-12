@@ -133,6 +133,8 @@ pub struct Deal {
     /// Лаг индикатора, например `-1M` (ждём ответа экспертов, docs/QUESTIONS.md).
     pub indicator_lag_cd: Option<String>,
     pub sub_indicator_lag_cd: Option<String>,
+    /// Досрочные погашения тела: пары `дата,сумма`.
+    pub prepayment_schedule: Vec<(NaiveDate, f64)>,
 }
 
 /// Тип события кэшфлоу — колонка `payment_type` формата 3.
@@ -169,8 +171,9 @@ impl PaymentType {
             PaymentType::SubRepricing => 1,
             PaymentType::InterestPayment => 2,
             PaymentType::SubPayment => 3,
-            PaymentType::PrincipalPayment | PaymentType::Prepayment => 4,
-            PaymentType::ClosePayment => 5,
+            PaymentType::Prepayment => 4,
+            PaymentType::PrincipalPayment => 5,
+            PaymentType::ClosePayment => 6,
         }
     }
 }
@@ -251,6 +254,8 @@ pub mod codes {
     /// FLOAT без правила и дат пересмотра — ставка зафиксирована на дату
     /// сделки (Q14).
     pub const FLOAT_NO_REPRICING: &str = "FLOAT_NO_REPRICING";
+    /// В одном календарном месяце более одного платежа по телу.
+    pub const DUPLICATE_PRINCIPAL_IN_MONTH: &str = "DUPLICATE_PRINCIPAL_IN_MONTH";
 }
 
 /// Одна запись `errors.csv`: `deal_id,severity,code,field,message`.
@@ -274,6 +279,8 @@ pub struct Config {
     pub event_on_report_date_is_past: bool,
     /// H9: расхождение явного графика тела с остатком уходит в close_payment.
     pub schedule_gap_to_close_payment: bool,
+    /// Ограничение: схлопывание регулярного платежа тела перед maturity_dttm, если они в одном месяце.
+    pub clamp_principal_monthly: bool,
 }
 
 impl Default for Config {
@@ -282,6 +289,7 @@ impl Default for Config {
             scenario_shift: 0.0,
             event_on_report_date_is_past: true,
             schedule_gap_to_close_payment: true,
+            clamp_principal_monthly: false,
         }
     }
 }
