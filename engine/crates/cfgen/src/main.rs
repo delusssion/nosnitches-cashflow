@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use cfcore::engine::build_cashflow;
-use cfcore::io::{parse_deals, read_deals, read_rates, write_errors_csv, CashflowWriter, DEAL_COLUMNS};
+use cfcore::io::{
+    parse_deals, read_deals, read_rates, write_errors_csv, CashflowWriter, DEAL_COLUMNS,
+};
 use cfcore::model::{Discriminator, PaymentType, RateType};
 use cfcore::{Config, Deal, Event, Severity};
 use chrono::NaiveDate;
@@ -169,9 +171,9 @@ fn scenario(
 
     // Применение изменений полей
     for s in set_fields {
-        let (k, v) = s
-            .split_once('=')
-            .with_context(|| format!("неверный формат аргумента «{s}», ожидается «поле=значение»"))?;
+        let (k, v) = s.split_once('=').with_context(|| {
+            format!("неверный формат аргумента «{s}», ожидается «поле=значение»")
+        })?;
         apply_deal_override(&mut mod_deal, k.trim(), v.trim())?;
     }
 
@@ -190,8 +192,10 @@ fn scenario(
     }
 
     let base_cfg = Config::default();
-    let mut mod_cfg = Config::default();
-    mod_cfg.clamp_principal_monthly = clamp_monthly;
+    let mod_cfg = Config {
+        clamp_principal_monthly: clamp_monthly,
+        ..Default::default()
+    };
 
     let (base_events, base_errs) = build_cashflow(&base_deal, &book, &base_cfg);
     let (mod_events, mod_errs) = build_cashflow(&mod_deal, &book, &mod_cfg);
@@ -253,12 +257,18 @@ fn scenario(
 
     println!(
         " {BOLD}{:<4} {:<10} {:<18} {:<8} {:>16} {:>16} {:>18} {:>18}{RESET}",
-        "#", "Дата", "Событие", "Поток", "Базовый (₽)", "Сценарий (₽)", "Дельта (Δ ₽)", "Остаток долга (₽)"
+        "#",
+        "Дата",
+        "Событие",
+        "Поток",
+        "Базовый (₽)",
+        "Сценарий (₽)",
+        "Дельта (Δ ₽)",
+        "Остаток долга (₽)"
     );
     println!("{GRAY}------------------------------------------------------------------------------------------------------------------------{RESET}");
 
-    let mut row_num = 1usize;
-    for k in all_keys {
+    for (row_idx, k) in all_keys.into_iter().enumerate() {
         let (d, ptype, stream) = k;
         let b_ev = base_map.get(&k).copied();
         let m_ev = mod_map.get(&k).copied();
@@ -267,7 +277,10 @@ fn scenario(
         let m_amt = m_ev.map(|e| e.amount).unwrap_or(0.0);
         let delta = m_amt - b_amt;
 
-        let after = m_ev.map(|e| e.principal_after).or_else(|| b_ev.map(|e| e.principal_after)).unwrap_or(0.0);
+        let after = m_ev
+            .map(|e| e.principal_after)
+            .or_else(|| b_ev.map(|e| e.principal_after))
+            .unwrap_or(0.0);
 
         let delta_str = if delta.abs() < 0.005 {
             format!("{GRAY}         0.00 ₽{RESET}")
@@ -306,7 +319,7 @@ fn scenario(
 
         println!(
             " {:<4} {:<10} {} {:<8} {} {} {} {:>16.2} ₽",
-            row_num,
+            row_idx + 1,
             d,
             ptype_colored,
             stream,
@@ -315,7 +328,6 @@ fn scenario(
             delta_str,
             after
         );
-        row_num += 1;
     }
 
     println!("{GRAY}------------------------------------------------------------------------------------------------------------------------{RESET}");
@@ -335,12 +347,22 @@ fn scenario(
 
     let b_body: f64 = base_events
         .iter()
-        .filter(|e| matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment | PaymentType::Prepayment))
+        .filter(|e| {
+            matches!(
+                e.payment_type,
+                PaymentType::PrincipalPayment | PaymentType::ClosePayment | PaymentType::Prepayment
+            )
+        })
         .map(|e| e.amount)
         .sum();
     let m_body: f64 = mod_events
         .iter()
-        .filter(|e| matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment | PaymentType::Prepayment))
+        .filter(|e| {
+            matches!(
+                e.payment_type,
+                PaymentType::PrincipalPayment | PaymentType::ClosePayment | PaymentType::Prepayment
+            )
+        })
         .map(|e| e.amount)
         .sum();
 
@@ -348,9 +370,17 @@ fn scenario(
     let m_last_date = mod_events.last().map(|e| e.payment_dttm);
 
     let int_diff_label = if int_delta < -0.01 {
-        format!("{GREEN}{BOLD}ЭКОНОМИЯ: -{:.2} ₽ ({:.1}%){RESET}", int_delta.abs(), (int_delta.abs() / b_int) * 100.0)
+        format!(
+            "{GREEN}{BOLD}ЭКОНОМИЯ: -{:.2} ₽ ({:.1}%){RESET}",
+            int_delta.abs(),
+            (int_delta.abs() / b_int) * 100.0
+        )
     } else if int_delta > 0.01 {
-        format!("{RED}{BOLD}ПЕРЕПЛАТА: +{:.2} ₽ (+{:.1}%){RESET}", int_delta, (int_delta / b_int) * 100.0)
+        format!(
+            "{RED}{BOLD}ПЕРЕПЛАТА: +{:.2} ₽ (+{:.1}%){RESET}",
+            int_delta,
+            (int_delta / b_int) * 100.0
+        )
     } else {
         format!("{GRAY}без изменений{RESET}")
     };
@@ -411,19 +441,32 @@ fn apply_deal_override(deal: &mut Deal, field: &str, val: &str) -> Result<()> {
             deal.current_principal_amt = val.parse().context("число current_principal_amt")?;
         }
         "maturity_dttm" => {
-            deal.maturity_dttm = NaiveDate::parse_from_str(val, "%Y-%m-%d").context("дата maturity_dttm (YYYY-MM-DD)")?;
+            deal.maturity_dttm = NaiveDate::parse_from_str(val, "%Y-%m-%d")
+                .context("дата maturity_dttm (YYYY-MM-DD)")?;
         }
         "base_indicator" => {
             deal.base_indicator = Some(val.to_string());
         }
         "cap_limit_interest_rate" => {
-            deal.cap_limit_interest_rate = if val.is_empty() { None } else { Some(val.parse()?) };
+            deal.cap_limit_interest_rate = if val.is_empty() {
+                None
+            } else {
+                Some(val.parse()?)
+            };
         }
         "floor_limit_interest_rate" => {
-            deal.floor_limit_interest_rate = if val.is_empty() { None } else { Some(val.parse()?) };
+            deal.floor_limit_interest_rate = if val.is_empty() {
+                None
+            } else {
+                Some(val.parse()?)
+            };
         }
         "sub_interest_rate" => {
-            deal.sub_interest_rate = if val.is_empty() { None } else { Some(val.parse()?) };
+            deal.sub_interest_rate = if val.is_empty() {
+                None
+            } else {
+                Some(val.parse()?)
+            };
         }
         _ => bail!("Поле «{field}» пока не поддерживается для прямого override в CLI"),
     }
@@ -440,51 +483,277 @@ fn deal_to_kv(deal: &Deal) -> Vec<(&'static str, String)> {
         ("discriminator", deal.discriminator.as_str().to_string()),
         ("deal_id", deal.deal_id.clone()),
         ("currency_id", deal.currency_id.clone()),
-        ("start_principal_amt", deal.start_principal_amt.map(|v| format!("{v:.2}")).unwrap_or_default()),
-        ("current_principal_amt", format!("{:.2}", deal.current_principal_amt)),
-        ("deal_dttm", deal.deal_dttm.map(|d| d.to_string()).unwrap_or_default()),
+        (
+            "start_principal_amt",
+            deal.start_principal_amt
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "current_principal_amt",
+            format!("{:.2}", deal.current_principal_amt),
+        ),
+        (
+            "deal_dttm",
+            deal.deal_dttm.map(|d| d.to_string()).unwrap_or_default(),
+        ),
         ("maturity_dttm", deal.maturity_dttm.to_string()),
-        ("rate_type_cd", match deal.rate_type_cd { RateType::Fixed => "FIXED", RateType::Float => "FLOAT" }.to_string()),
+        (
+            "rate_type_cd",
+            match deal.rate_type_cd {
+                RateType::Fixed => "FIXED",
+                RateType::Float => "FLOAT",
+            }
+            .to_string(),
+        ),
         ("interest_rate", format!("{:.6}", deal.interest_rate)),
-        ("base_indicator_rate", deal.base_indicator_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("base_indicator", deal.base_indicator.clone().unwrap_or_default()),
-        ("interest_payment_rule_start_dttm", deal.interest_payment_rule.start_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("interest_payment_rule_period_cd", deal.interest_payment_rule.period_cd.map(period_str).unwrap_or_default()),
-        ("interest_payment_rule_day_num", deal.interest_payment_rule.day_num.map(|n| n.to_string()).unwrap_or_default()),
-        ("day_convention_cd", match deal.day_convention_cd { cfcore::model::DayConvention::Act365 => "ACT/365", cfcore::model::DayConvention::ActActIsda => "ACT/ACT ISDA" }.to_string()),
-        ("regular_payment_rule_start_dttm", deal.regular_payment_rule.start_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("regular_payment_rule_period_cd", deal.regular_payment_rule.period_cd.map(period_str).unwrap_or_default()),
-        ("regular_payment_rule_day_num", deal.regular_payment_rule.day_num.map(|n| n.to_string()).unwrap_or_default()),
-        ("repricing_rule_start_dttm", deal.repricing_rule.start_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("repricing_rule_period_cd", deal.repricing_rule.period_cd.map(period_str).unwrap_or_default()),
-        ("repricing_rule_day_num", deal.repricing_rule.day_num.map(|n| n.to_string()).unwrap_or_default()),
-        ("accrued_interest", deal.accrued_interest.map(|v| format!("{v:.2}")).unwrap_or_default()),
+        (
+            "base_indicator_rate",
+            deal.base_indicator_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "base_indicator",
+            deal.base_indicator.clone().unwrap_or_default(),
+        ),
+        (
+            "interest_payment_rule_start_dttm",
+            deal.interest_payment_rule
+                .start_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "interest_payment_rule_period_cd",
+            deal.interest_payment_rule
+                .period_cd
+                .map(period_str)
+                .unwrap_or_default(),
+        ),
+        (
+            "interest_payment_rule_day_num",
+            deal.interest_payment_rule
+                .day_num
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "day_convention_cd",
+            match deal.day_convention_cd {
+                cfcore::model::DayConvention::Act365 => "ACT/365",
+                cfcore::model::DayConvention::ActActIsda => "ACT/ACT ISDA",
+            }
+            .to_string(),
+        ),
+        (
+            "regular_payment_rule_start_dttm",
+            deal.regular_payment_rule
+                .start_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "regular_payment_rule_period_cd",
+            deal.regular_payment_rule
+                .period_cd
+                .map(period_str)
+                .unwrap_or_default(),
+        ),
+        (
+            "regular_payment_rule_day_num",
+            deal.regular_payment_rule
+                .day_num
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "repricing_rule_start_dttm",
+            deal.repricing_rule
+                .start_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "repricing_rule_period_cd",
+            deal.repricing_rule
+                .period_cd
+                .map(period_str)
+                .unwrap_or_default(),
+        ),
+        (
+            "repricing_rule_day_num",
+            deal.repricing_rule
+                .day_num
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "accrued_interest",
+            deal.accrued_interest
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+        ),
         ("product", deal.product.clone().unwrap_or_default()),
-        ("behavior_model_cd", deal.behavior_model_cd.clone().unwrap_or_default()),
-        ("interest_payment", deal.interest_payment.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" ")),
-        ("principal_payment", deal.principal_payment.iter().map(|(d, a)| format!("{d},{a}")).collect::<Vec<_>>().join(" ")),
-        ("repricing_dttm_schedule", deal.repricing_dttm_schedule.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" ")),
-        ("repricing_dttm_rate_schedule", deal.repricing_dttm_rate_schedule.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" ")),
-        ("repricing_dttm_rate_schedule_fixed", deal.repricing_dttm_rate_schedule_fixed.iter().map(|(d, r)| format!("{d},{r}")).collect::<Vec<_>>().join(" ")),
-        ("cap_limit_interest_rate", deal.cap_limit_interest_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("floor_limit_interest_rate", deal.floor_limit_interest_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("sub_rate_type_cd", deal.sub_rate_type_cd.clone().unwrap_or_default()),
-        ("sub_interest_rate", deal.sub_interest_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("sub_float_indicator", deal.sub_float_indicator.clone().unwrap_or_default()),
-        ("sub_payment_rule_period_cd", deal.sub_payment_rule.period_cd.map(period_str).unwrap_or_default()),
-        ("sub_payment_rule_day_num", deal.sub_payment_rule.day_num.map(|n| n.to_string()).unwrap_or_default()),
-        ("sub_payment_rule_start_dttm", deal.sub_payment_rule.start_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("sub_repricing_rule_start_dttm", deal.sub_repricing_rule.start_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("sub_repricing_rule_period_cd", deal.sub_repricing_rule.period_cd.map(period_str).unwrap_or_default()),
-        ("sub_repricing_rule_day_num", deal.sub_repricing_rule.day_num.map(|n| n.to_string()).unwrap_or_default()),
-        ("sub_cap_limit_interest_rate", deal.sub_cap_limit_interest_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("sub_floor_limit_interest_rate", deal.sub_floor_limit_interest_rate.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("sub_coeff_index", deal.sub_coeff_index.map(|v| format!("{v:.6}")).unwrap_or_default()),
-        ("deal_report_dttm", deal.deal_report_dttm.map(|d| d.to_string()).unwrap_or_default()),
-        ("sub_repricing_rule_first_event_flg", deal.sub_repricing_rule_first_event_flg.map(|b| if b { "1" } else { "0" }).unwrap_or_default().to_string()),
-        ("indicator_lag_cd", deal.indicator_lag_cd.clone().unwrap_or_default()),
-        ("sub_indicator_lag_cd", deal.sub_indicator_lag_cd.clone().unwrap_or_default()),
-        ("prepayment", deal.prepayment_schedule.iter().map(|(d, a)| format!("{d},{a}")).collect::<Vec<_>>().join(" ")),
+        (
+            "behavior_model_cd",
+            deal.behavior_model_cd.clone().unwrap_or_default(),
+        ),
+        (
+            "interest_payment",
+            deal.interest_payment
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "principal_payment",
+            deal.principal_payment
+                .iter()
+                .map(|(d, a)| format!("{d},{a}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "repricing_dttm_schedule",
+            deal.repricing_dttm_schedule
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "repricing_dttm_rate_schedule",
+            deal.repricing_dttm_rate_schedule
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "repricing_dttm_rate_schedule_fixed",
+            deal.repricing_dttm_rate_schedule_fixed
+                .iter()
+                .map(|(d, r)| format!("{d},{r}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        (
+            "cap_limit_interest_rate",
+            deal.cap_limit_interest_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "floor_limit_interest_rate",
+            deal.floor_limit_interest_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_rate_type_cd",
+            deal.sub_rate_type_cd.clone().unwrap_or_default(),
+        ),
+        (
+            "sub_interest_rate",
+            deal.sub_interest_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_float_indicator",
+            deal.sub_float_indicator.clone().unwrap_or_default(),
+        ),
+        (
+            "sub_payment_rule_period_cd",
+            deal.sub_payment_rule
+                .period_cd
+                .map(period_str)
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_payment_rule_day_num",
+            deal.sub_payment_rule
+                .day_num
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_payment_rule_start_dttm",
+            deal.sub_payment_rule
+                .start_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_repricing_rule_start_dttm",
+            deal.sub_repricing_rule
+                .start_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_repricing_rule_period_cd",
+            deal.sub_repricing_rule
+                .period_cd
+                .map(period_str)
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_repricing_rule_day_num",
+            deal.sub_repricing_rule
+                .day_num
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_cap_limit_interest_rate",
+            deal.sub_cap_limit_interest_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_floor_limit_interest_rate",
+            deal.sub_floor_limit_interest_rate
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_coeff_index",
+            deal.sub_coeff_index
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_default(),
+        ),
+        (
+            "deal_report_dttm",
+            deal.deal_report_dttm
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "sub_repricing_rule_first_event_flg",
+            deal.sub_repricing_rule_first_event_flg
+                .map(|b| if b { "1" } else { "0" })
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        (
+            "indicator_lag_cd",
+            deal.indicator_lag_cd.clone().unwrap_or_default(),
+        ),
+        (
+            "sub_indicator_lag_cd",
+            deal.sub_indicator_lag_cd.clone().unwrap_or_default(),
+        ),
+        (
+            "prepayment",
+            deal.prepayment_schedule
+                .iter()
+                .map(|(d, a)| format!("{d},{a}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
     ]
 }
 
@@ -506,7 +775,9 @@ fn inspect(deals_path: &Path, deal_id: &str, export_path: Option<&Path>) -> Resu
     let kv = deal_to_kv(deal);
 
     println!();
-    println!("{BOLD}{CYAN}=== ИНСПЕКЦИЯ СДЕЛКИ: deal_id = {deal_id} (все 48 полей формата 1) ==={RESET}");
+    println!(
+        "{BOLD}{CYAN}=== ИНСПЕКЦИЯ СДЕЛКИ: deal_id = {deal_id} (все 48 полей формата 1) ==={RESET}"
+    );
     for (i, (k, v)) in kv.iter().enumerate() {
         let val_disp = if v.is_empty() {
             format!("{GRAY}(пусто){RESET}")
@@ -530,7 +801,8 @@ fn inspect(deals_path: &Path, deal_id: &str, export_path: Option<&Path>) -> Resu
 }
 
 fn convert(input_path: &Path, output_path: Option<&Path>) -> Result<()> {
-    let file = File::open(input_path).with_context(|| format!("открытие {}", input_path.display()))?;
+    let file =
+        File::open(input_path).with_context(|| format!("открытие {}", input_path.display()))?;
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     for line in BufReader::new(file).lines() {
         let l = line?;
@@ -583,8 +855,10 @@ fn run(deals_path: &Path, rates_path: &Path, out_dir: &Path, clamp_monthly: bool
     let book = read_rates(rates_path)
         .with_context(|| format!("чтение ставок {}", rates_path.display()))?;
 
-    let mut cfg = Config::default();
-    cfg.clamp_principal_monthly = clamp_monthly;
+    let cfg = Config {
+        clamp_principal_monthly: clamp_monthly,
+        ..Default::default()
+    };
 
     if out_dir == Path::new("-") {
         let stdout = io::stdout();

@@ -882,7 +882,9 @@ mod tests {
         assert_eq!(prepay.len(), 1);
         assert_eq!(prepay[0].payment_dttm, d("2022-11-15"));
         assert_eq!(prepay[0].amount, 300_000.0);
-        assert!((prepay[0].principal_after - (prepay[0].principal_before - 300_000.0)).abs() < 1e-6);
+        assert!(
+            (prepay[0].principal_after - (prepay[0].principal_before - 300_000.0)).abs() < 1e-6
+        );
 
         let last = events.last().unwrap();
         assert_eq!(last.principal_after, 0.0);
@@ -904,8 +906,10 @@ mod tests {
         let april_unclamped: Vec<_> = ev_unclamped
             .iter()
             .filter(|e| {
-                matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment)
-                    && e.payment_dttm.month() == 4
+                matches!(
+                    e.payment_type,
+                    PaymentType::PrincipalPayment | PaymentType::ClosePayment
+                ) && e.payment_dttm.month() == 4
                     && e.payment_dttm.year() == 2023
             })
             .collect();
@@ -917,8 +921,10 @@ mod tests {
         let april_clamped: Vec<_> = ev_clamped
             .iter()
             .filter(|e| {
-                matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment)
-                    && e.payment_dttm.month() == 4
+                matches!(
+                    e.payment_type,
+                    PaymentType::PrincipalPayment | PaymentType::ClosePayment
+                ) && e.payment_dttm.month() == 4
                     && e.payment_dttm.year() == 2023
             })
             .collect();
