@@ -12,3 +12,9 @@ CLAUDE.local.md
 docs/tasks/
 .DS_Store
 testdata/golden/all/
+engine/out*/
+docs/zcode_summary.md
+testdata/deals/deal_22_inspect.txt
+testdata/deals/test1.csv
+testdata/deals/test2.csv
+testdata/deals/test_deals3.csv

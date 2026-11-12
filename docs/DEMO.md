@@ -19,3 +19,36 @@
 - `screenshots/03-deal-float.png` — FLOAT с репрайсингом
 - `screenshots/04-compare-green.png` — сверка, всё зелёное
 - `screenshots/05-portfolio-total.png` — итог по портфелю
+
+---
+
+## Консольный сценарный режим защиты (Спринт 3: без Excel и без VS Code regex)
+
+Для ответа на любые вопросы преподавателя («А что если изменить ставку / добавить досрочку / убрать дубли платежей?»):
+
+### 1. Вертикальный просмотр сделки без Excel:
+```powershell
+cargo run -p cfgen -- inspect --deals testdata/deals/test_deals.csv --deal-id 22
+```
+
+### 2. Сценарий «Частичное досрочное погашение (Prepayment) + рост ставки»:
+```powershell
+cargo run -p cfgen -- scenario \
+    --deals testdata/deals/test_deals.csv \
+    --rates testdata/rates/key_rate.csv \
+    --deal-id 22 \
+    --set interest_rate=0.15 \
+    --prepay 2022-11-20:250000
+```
+*На экране моментально появится цветная таблица сравнения платежей, дельта сэкономленных процентов и отметка о досрочном закрытии.*
+
+### 3. Сценарий «Ограничение: не более одного платежа тела в месяц»:
+```powershell
+cargo run -p cfgen -- scenario \
+    --deals testdata/deals/test_deals.csv \
+    --rates testdata/rates/key_rate.csv \
+    --deal-id 22 \
+    --clamp-monthly
+```
+*Наглядно показывает отмену дублирующего платежа 20 апреля и объединение в финальный close_payment 30 апреля.*
+

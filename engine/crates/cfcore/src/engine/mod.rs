@@ -95,7 +95,7 @@ fn interest_dates_all(deal: &Deal) -> Vec<NaiveDate> {
 /// Все даты тела ANN/RGM (§2.1): правило тела (ENDDATE — пусто), иначе даты
 /// процентов; всегда плюс дата погашения. Явный график тела у ANN/RGM не
 /// используется (словарь §1: поле только для SIMPLE).
-fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate]) -> Vec<NaiveDate> {
+fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate], cfg: &Config) -> Vec<NaiveDate> {
     let mut dates: BTreeSet<NaiveDate> = match deal.regular_payment_rule.period_cd {
         Some(PeriodCd::Months(_)) | Some(PeriodCd::Days(_)) => {
             dates::rule_schedule(&deal.regular_payment_rule, deal.maturity_dttm)
@@ -105,6 +105,12 @@ fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate]) -> Vec<NaiveDate
         Some(PeriodCd::EndDate) => BTreeSet::new(),
         None => interest_all.iter().copied().collect(),
     };
+    if cfg.clamp_principal_monthly {
+        use chrono::Datelike;
+        dates.retain(|d| {
+            !(d.year() == deal.maturity_dttm.year() && d.month() == deal.maturity_dttm.month())
+        });
+    }
     dates.insert(deal.maturity_dttm);
     dates
         .into_iter()
@@ -327,13 +333,20 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
             dates.insert(maturity);
             dates.into_iter().collect()
         }
-        _ => principal_dates_all(deal, &interest_all)
+        _ => principal_dates_all(deal, &interest_all, cfg)
             .into_iter()
             .filter(|d| is_future(*d, deal, cfg))
             .collect(),
     };
     if principal_future.is_empty() {
         return Vec::new();
+    }
+
+    let mut prepay_map: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    for (d, a) in &deal.prepayment_schedule {
+        if is_future(*d, deal, cfg) && *a > 0.0 {
+            *prepay_map.entry(*d).or_insert(0.0) += a;
+        }
     }
 
     // 2. Состояние на дату расчёта (§4.2, §6.2).
@@ -362,7 +375,7 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
     } else {
         0.0
     };
-    let rgm_share = if deal.discriminator == Discriminator::Rgm && n_left > 0 {
+    let mut rgm_share = if deal.discriminator == Discriminator::Rgm && n_left > 0 {
         balance / n_left as f64
     } else {
         0.0
@@ -373,6 +386,7 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
         .iter()
         .chain(principal_future.iter())
         .chain(repricing_future.iter())
+        .chain(prepay_map.keys())
         .copied()
         .collect();
     let mut events: Vec<Event> = Vec::new();
@@ -423,6 +437,56 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
             ));
             accrued = 0.0;
             last_interest = p;
+        }
+
+        // 3.4 досрочное погашение (prepayment)
+        if let Some(&prepay_raw) = prepay_map.get(&p) {
+            let amount = f64::max(0.0, f64::min(prepay_raw.abs(), balance.abs()))
+                * (1.0_f64.copysign(balance));
+            if amount.abs() > 1e-9 {
+                let closes = (balance - amount).abs() < 1e-9;
+                let after = if closes { 0.0 } else { balance - amount };
+                events.push(mk_event(
+                    p,
+                    PaymentType::Prepayment,
+                    Stream::Client,
+                    amount,
+                    balance,
+                    after,
+                    rate_used,
+                    base_used,
+                    None,
+                    conv,
+                ));
+                balance = after;
+
+                if closes && accrued != 0.0 {
+                    events.push(mk_event(
+                        p,
+                        PaymentType::InterestPayment,
+                        Stream::Client,
+                        accrued,
+                        balance,
+                        balance,
+                        rate_used,
+                        base_used,
+                        Some((last_interest, p)),
+                        conv,
+                    ));
+                    accrued = 0.0;
+                }
+
+                let n_rem = principal_future.iter().filter(|d| **d > p).count();
+                if deal.discriminator == Discriminator::Ann && n_rem > 0 {
+                    ann_payment = annuity(balance, rate, months, n_rem);
+                } else if deal.discriminator == Discriminator::Rgm && n_rem > 0 {
+                    rgm_share = balance / n_rem as f64;
+                }
+
+                if balance == 0.0 {
+                    break;
+                }
+            }
         }
 
         // 3.5 погашение тела
@@ -542,6 +606,7 @@ pub(crate) mod testing {
             deal_report_dttm: None,
             indicator_lag_cd: None,
             sub_indicator_lag_cd: None,
+            prepayment_schedule: Vec::new(),
         }
     }
 
@@ -554,6 +619,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{base_deal as deal, cfg, d};
     use super::*;
+    use crate::model::PaymentRule;
 
     #[test]
     fn simple_segments_gap_close_and_accrued() {
@@ -793,5 +859,72 @@ mod tests {
         let want = 1_000_000.0 * (0.09 * 45.0 / 365.0 + 0.12 * 16.0 / 365.0);
         assert!((ints[0].amount - want).abs() < 1e-6);
         assert!((ints[1].amount - 1_000_000.0 * 0.12 * 30.0 / 365.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn prepayment_reduces_balance_and_recalculates_annuity() {
+        let mut dl = deal();
+        dl.discriminator = Discriminator::Ann;
+        dl.interest_rate = 0.12;
+        dl.maturity_dttm = d("2023-08-31");
+        dl.regular_payment_rule = PaymentRule {
+            start_dttm: Some(d("2022-08-31")),
+            period_cd: Some(PeriodCd::Months(1)),
+            day_num: Some(-1),
+        };
+        dl.prepayment_schedule = vec![(d("2022-11-15"), 300_000.0)];
+
+        let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
+        let prepay: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.payment_type == PaymentType::Prepayment)
+            .collect();
+        assert_eq!(prepay.len(), 1);
+        assert_eq!(prepay[0].payment_dttm, d("2022-11-15"));
+        assert_eq!(prepay[0].amount, 300_000.0);
+        assert!((prepay[0].principal_after - (prepay[0].principal_before - 300_000.0)).abs() < 1e-6);
+
+        let last = events.last().unwrap();
+        assert_eq!(last.principal_after, 0.0);
+    }
+
+    #[test]
+    fn clamp_principal_monthly_removes_duplicate_in_maturity_month() {
+        use chrono::Datelike;
+        let mut dl = deal();
+        dl.discriminator = Discriminator::Rgm;
+        dl.maturity_dttm = d("2023-04-30");
+        dl.regular_payment_rule = PaymentRule {
+            start_dttm: Some(d("2022-08-20")),
+            period_cd: Some(PeriodCd::Months(1)),
+            day_num: Some(20),
+        };
+
+        let (ev_unclamped, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
+        let april_unclamped: Vec<_> = ev_unclamped
+            .iter()
+            .filter(|e| {
+                matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment)
+                    && e.payment_dttm.month() == 4
+                    && e.payment_dttm.year() == 2023
+            })
+            .collect();
+        assert_eq!(april_unclamped.len(), 2);
+
+        let mut c = cfg();
+        c.clamp_principal_monthly = true;
+        let (ev_clamped, _) = build_cashflow(&dl, &RateBook::new(), &c);
+        let april_clamped: Vec<_> = ev_clamped
+            .iter()
+            .filter(|e| {
+                matches!(e.payment_type, PaymentType::PrincipalPayment | PaymentType::ClosePayment)
+                    && e.payment_dttm.month() == 4
+                    && e.payment_dttm.year() == 2023
+            })
+            .collect();
+        assert_eq!(april_clamped.len(), 1);
+        assert_eq!(april_clamped[0].payment_dttm, d("2023-04-30"));
+        assert_eq!(april_clamped[0].payment_type, PaymentType::ClosePayment);
+        assert_eq!(ev_clamped.last().unwrap().principal_after, 0.0);
     }
 }
