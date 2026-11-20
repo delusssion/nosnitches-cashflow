@@ -9,3 +9,13 @@ chrono.workspace = true
 csv.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
+itoa.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "engine"
+harness = false

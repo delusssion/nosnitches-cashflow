@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 
 use chrono::NaiveDate;
-use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
+use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 
 use crate::dates;
 use crate::model::{DayConvention, Deal, DealError, Discriminator, Event, PaymentRule, RateType};
@@ -440,37 +440,24 @@ pub const CASHFLOW_HEADER: [&str; 16] = [
 /// дописываются по мере расчёта — ничего не копится в памяти (цель E10:
 /// миллион сделок меньше 500 МБ).
 pub struct CashflowWriter<W: Write> {
-    inner: Writer<W>,
+    inner: W,
+    buf: Vec<u8>,
 }
 
 impl<W: Write> CashflowWriter<W> {
-    pub fn from_writer(w: W) -> csv::Result<Self> {
-        let mut inner = WriterBuilder::new().from_writer(w);
-        inner.write_record(CASHFLOW_HEADER)?;
-        Ok(Self { inner })
+    pub fn from_writer(mut w: W) -> csv::Result<Self> {
+        w.write_all(CASHFLOW_HEADER.join(",").as_bytes())?;
+        w.write_all(b"\n")?;
+        Ok(Self {
+            inner: w,
+            buf: Vec::with_capacity(64 * 1024),
+        })
     }
 
     pub fn write_deal(&mut self, deal: &Deal, events: &[Event]) -> csv::Result<()> {
-        for e in events {
-            self.inner.write_record([
-                deal.report_dttm.to_string(),
-                deal.deal_id.clone(),
-                e.event_order.to_string(),
-                e.payment_dttm.to_string(),
-                e.payment_type.as_str().to_string(),
-                e.stream.as_str().to_string(),
-                fmt_money(e.amount),
-                fmt_money(e.principal_before),
-                fmt_money(e.principal_after),
-                e.rate.map(fmt_rate10).unwrap_or_default(),
-                e.base_rate.map(fmt_rate10).unwrap_or_default(),
-                fmt_opt_date(e.accrual_start_dttm),
-                fmt_opt_date(e.accrual_end_dttm),
-                e.accrual_days.map(|d| d.to_string()).unwrap_or_default(),
-                e.year_frac.map(|v| format!("{v:.10}")).unwrap_or_default(),
-                deal.discriminator.as_str().to_string(),
-            ])?;
-        }
+        self.buf.clear();
+        format_deal(&mut self.buf, deal, events);
+        self.inner.write_all(&self.buf)?;
         Ok(())
     }
 
@@ -490,29 +477,268 @@ pub fn write_errors_csv<W: Write>(w: W, errors: &[DealError]) -> csv::Result<()>
     Ok(())
 }
 
-/// Деньги: два знака, минус-ноль не выводим (формат эталонов).
-fn fmt_money(v: f64) -> String {
-    let s = format!("{v:.2}");
-    if s == "-0.00" {
-        "0.00".to_string()
-    } else {
-        s
+// ---------- потоковое чтение (B4, B9) ----------
+
+/// Потоковое чтение сделок: по одной, буфер записи переиспользуется, память
+/// не растёт с размером файла. Строка, которую не удалось разобрать, не рвёт
+/// чтение: она возвращается как [`DealError`] с severity `error` (сделка
+/// пропускается, остальные считаются дальше).
+pub struct DealReader<R: Read> {
+    reader: csv::Reader<R>,
+    pos: [usize; 48],
+    /// Необязательная колонка досрочек (`prepayment_schedule` / `prepayment`).
+    pos_prepay: Option<usize>,
+    record: StringRecord,
+    done: bool,
+}
+
+impl<R: Read> DealReader<R> {
+    /// Читает заголовок; ошибка — если в нём нет какой-то из 48 колонок.
+    pub fn new(rdr: R) -> Result<Self, RowError> {
+        let mut reader = ReaderBuilder::new().from_reader(rdr);
+        let header: StringRecord = reader.headers().map_err(RowError::Csv)?.clone();
+        let mut pos = [0usize; 48];
+        for (i, name) in DEAL_COLUMNS.iter().enumerate() {
+            pos[i] = header
+                .iter()
+                .position(|h| h.trim().trim_start_matches('\u{feff}') == *name)
+                .ok_or_else(|| RowError::Msg {
+                    line: 1,
+                    message: format!("в заголовке нет колонки {name}"),
+                })?;
+        }
+        let pos_prepay = header.iter().position(|h| {
+            let s = h.trim().trim_start_matches('\u{feff}');
+            s == "prepayment" || s == "prepayment_schedule"
+        });
+        Ok(Self {
+            reader,
+            pos,
+            pos_prepay,
+            record: StringRecord::new(),
+            done: false,
+        })
+    }
+
+    /// Следующая сделка: `Some(Ok)` — разобрана, `Some(Err)` — строка с
+    /// ошибкой (в `errors.csv`), `None` — конец файла или ошибка ввода-вывода
+    /// (она тоже возвращается один раз как `Some(Err)`).
+    pub fn next_deal(&mut self) -> Option<Result<Deal, DealError>> {
+        if self.done {
+            return None;
+        }
+        match self.reader.read_record(&mut self.record) {
+            Ok(false) => {
+                self.done = true;
+                None
+            }
+            Ok(true) => {
+                let deal_id = self
+                    .record
+                    .get(self.pos[2])
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                Some(
+                    parse_deal_row(&self.record, &self.pos, self.pos_prepay).map_err(|message| {
+                        let (code, field) = classify_row_error(&message);
+                        DealError {
+                            deal_id,
+                            severity: crate::model::Severity::Error,
+                            code,
+                            field,
+                            message,
+                        }
+                    }),
+                )
+            }
+            Err(err) => {
+                if err.is_io_error() {
+                    self.done = true;
+                }
+                Some(Err(DealError {
+                    deal_id: String::new(),
+                    severity: crate::model::Severity::Error,
+                    code: "BAD_CSV",
+                    field: "",
+                    message: err.to_string(),
+                }))
+            }
+        }
     }
 }
 
-/// Ставка/индикатор: округление до 10 знаков, хвостовые нули срезаны.
-fn fmt_rate10(v: f64) -> String {
-    let s = format!("{v:.10}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-0" {
-        "0".to_string()
+/// Код и поле ошибки разбора по тексту сообщения «поле <имя>: …» (коды B4).
+fn classify_row_error(message: &str) -> (&'static str, &'static str) {
+    let field = message
+        .strip_prefix("поле ")
+        .and_then(|rest| rest.split([' ', ':']).next())
+        .and_then(|name| DEAL_COLUMNS.iter().copied().find(|c| *c == name))
+        .unwrap_or("");
+    let code = if message.contains("обязательно") {
+        "MISSING_FIELD"
+    } else if message.contains("ANN/RGM/SIMPLE") {
+        "UNKNOWN_DISCRIMINATOR"
+    } else if message.contains("не период") {
+        "BAD_PERIOD"
+    } else if message.contains("не дата") {
+        "BAD_DATE"
+    } else if message.contains("не число") || message.contains("не целое") {
+        "BAD_NUMBER"
     } else {
-        trimmed.to_string()
+        "BAD_FIELD"
+    };
+    (code, field)
+}
+
+// ---------- быстрая запись формата 3 (B9) ----------
+
+/// Пишет события сделки в CSV формата 3 в буфер `buf` (без заголовка).
+///
+/// Числа форматируются целочисленной арифметикой (`itoa`), без `format!` —
+/// это горячий цикл: на миллионе синтетических сделок сотни миллионов строк.
+/// Суммы — 2 знака, ставки — до 10 знаков без хвостовых нулей, доля года —
+/// ровно 10 знаков. Буфер можно заполнять в любом потоке и писать потом.
+pub fn format_deal(buf: &mut Vec<u8>, deal: &Deal, events: &[Event]) {
+    let mut report = [0u8; 10];
+    put_date(&mut report, deal.report_dttm);
+    let mut id = Vec::with_capacity(deal.deal_id.len() + 2);
+    push_field(&mut id, &deal.deal_id);
+    let disc = deal.discriminator.as_str().as_bytes();
+    let mut ib = itoa::Buffer::new();
+    let mut d = [0u8; 10];
+    for e in events {
+        buf.extend_from_slice(&report);
+        buf.push(b',');
+        buf.extend_from_slice(&id);
+        buf.push(b',');
+        buf.extend_from_slice(ib.format(e.event_order).as_bytes());
+        buf.push(b',');
+        put_date(&mut d, e.payment_dttm);
+        buf.extend_from_slice(&d);
+        buf.push(b',');
+        buf.extend_from_slice(e.payment_type.as_str().as_bytes());
+        buf.push(b',');
+        buf.extend_from_slice(e.stream.as_str().as_bytes());
+        buf.push(b',');
+        push_fixed(buf, e.amount, 2, false);
+        buf.push(b',');
+        push_fixed(buf, e.principal_before, 2, false);
+        buf.push(b',');
+        push_fixed(buf, e.principal_after, 2, false);
+        buf.push(b',');
+        if let Some(r) = e.rate {
+            push_fixed(buf, r, 10, true);
+        }
+        buf.push(b',');
+        if let Some(r) = e.base_rate {
+            push_fixed(buf, r, 10, true);
+        }
+        buf.push(b',');
+        if let Some(a) = e.accrual_start_dttm {
+            put_date(&mut d, a);
+            buf.extend_from_slice(&d);
+        }
+        buf.push(b',');
+        if let Some(a) = e.accrual_end_dttm {
+            put_date(&mut d, a);
+            buf.extend_from_slice(&d);
+        }
+        buf.push(b',');
+        if let Some(n) = e.accrual_days {
+            buf.extend_from_slice(ib.format(n).as_bytes());
+        }
+        buf.push(b',');
+        if let Some(y) = e.year_frac {
+            push_fixed(buf, y, 10, false);
+        }
+        buf.push(b',');
+        buf.extend_from_slice(disc);
+        buf.push(b'\n');
     }
 }
 
-fn fmt_opt_date(v: Option<NaiveDate>) -> String {
-    v.map(|d| d.to_string()).unwrap_or_default()
+/// Поле CSV: в кавычках, только если есть запятая, кавычка или перевод строки.
+fn push_field(buf: &mut Vec<u8>, s: &str) {
+    if s.bytes().any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r')) {
+        buf.push(b'"');
+        for b in s.bytes() {
+            if b == b'"' {
+                buf.push(b'"');
+            }
+            buf.push(b);
+        }
+        buf.push(b'"');
+    } else {
+        buf.extend_from_slice(s.as_bytes());
+    }
+}
+
+/// Дата в `YYYY-MM-DD` без аллокаций.
+fn put_date(out: &mut [u8; 10], d: NaiveDate) {
+    use chrono::Datelike;
+    let y = d.year().clamp(0, 9999) as u32;
+    let (m, day) = (d.month(), d.day());
+    out[0] = b'0' + (y / 1000) as u8;
+    out[1] = b'0' + (y / 100 % 10) as u8;
+    out[2] = b'0' + (y / 10 % 10) as u8;
+    out[3] = b'0' + (y % 10) as u8;
+    out[4] = b'-';
+    out[5] = b'0' + (m / 10) as u8;
+    out[6] = b'0' + (m % 10) as u8;
+    out[7] = b'-';
+    out[8] = b'0' + (day / 10) as u8;
+    out[9] = b'0' + (day % 10) as u8;
+}
+
+/// Число с фиксированным числом знаков, как `format!("{v:.N}")`: `-0` пишется
+/// как `0`, `trim` убирает хвостовые нули. Быстрый путь — целочисленный
+/// (`itoa`); значения на границе половины младшего разряда (…,125) идут через
+/// `format!`, чтобы округление совпадало с ним и с эталоном на Python точно.
+fn push_fixed(buf: &mut Vec<u8>, v: f64, decimals: u32, trim: bool) {
+    let scale = 10u64.pow(decimals);
+    let x = v * scale as f64;
+    let near_half = (x - x.floor() - 0.5).abs() < 1e-6;
+    if near_half || !x.is_finite() || x.abs() >= 9.0e18 {
+        let s = format!("{v:.prec$}", prec = decimals as usize);
+        let s = if s.bytes().all(|b| matches!(b, b'-' | b'0' | b'.')) {
+            s.trim_start_matches('-')
+        } else {
+            s.as_str()
+        };
+        let s = if trim && s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            s
+        };
+        buf.extend_from_slice(s.as_bytes());
+        return;
+    }
+    let scaled = x.round();
+    let neg = scaled < 0.0;
+    let a = scaled.abs() as u64;
+    let (int, mut frac) = (a / scale, a % scale);
+    if neg && a != 0 {
+        buf.push(b'-');
+    }
+    let mut ib = itoa::Buffer::new();
+    buf.extend_from_slice(ib.format(int).as_bytes());
+    let mut digits = decimals as usize;
+    if trim {
+        while digits > 0 && frac % 10 == 0 {
+            frac /= 10;
+            digits -= 1;
+        }
+        if digits == 0 {
+            return;
+        }
+    }
+    buf.push(b'.');
+    let s = ib.format(frac);
+    for _ in s.len()..digits {
+        buf.push(b'0');
+    }
+    buf.extend_from_slice(s.as_bytes());
 }
 
 #[cfg(test)]
@@ -526,5 +752,62 @@ mod tests {
         assert_eq!(DEAL_COLUMNS[47], "sub_indicator_lag_cd");
         assert_eq!(DEAL_COLUMNS.len(), 48);
         assert_eq!(CASHFLOW_HEADER.len(), 16);
+    }
+
+    #[test]
+    fn fixed_point_formatting() {
+        let cases: [(f64, u32, bool, &str); 12] = [
+            (1234.5, 2, false, "1234.50"),
+            (-0.004, 2, false, "0.00"),
+            (-1896648.88, 2, false, "-1896648.88"),
+            (0.0849315068493, 10, false, "0.0849315068"),
+            (0.19, 10, true, "0.19"),
+            (0.075, 10, true, "0.075"),
+            (1.0, 10, true, "1"),
+            (0.0, 10, true, "0"),
+            (0.0, 2, false, "0.00"),
+            (0.155, 10, true, "0.155"),
+            (2605973.125, 2, false, "2605973.12"),
+            (-360611.685, 2, false, "-360611.68"),
+        ];
+        for (v, dec, trim, want) in cases {
+            let mut b = Vec::new();
+            push_fixed(&mut b, v, dec, trim);
+            assert_eq!(String::from_utf8(b).unwrap(), want, "{v} {dec} {trim}");
+        }
+    }
+
+    #[test]
+    fn row_errors_are_classified() {
+        let cases = [
+            (
+                "поле current_principal_amt: «x» не число",
+                "BAD_NUMBER",
+                "current_principal_amt",
+            ),
+            (
+                "поле maturity_dttm: «31.12.2022» не дата YYYY-MM-DD",
+                "BAD_DATE",
+                "maturity_dttm",
+            ),
+            (
+                "поле discriminator: «XXX» не ANN/RGM/SIMPLE",
+                "UNKNOWN_DISCRIMINATOR",
+                "discriminator",
+            ),
+            (
+                "поле deal_id обязательно, но пустое",
+                "MISSING_FIELD",
+                "deal_id",
+            ),
+            (
+                "поле interest_payment_rule_period_cd: «7Q» не период",
+                "BAD_PERIOD",
+                "interest_payment_rule_period_cd",
+            ),
+        ];
+        for (msg, code, field) in cases {
+            assert_eq!(classify_row_error(msg), (code, field), "{msg}");
+        }
     }
 }

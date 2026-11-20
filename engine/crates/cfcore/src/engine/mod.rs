@@ -17,7 +17,7 @@ pub mod rgm;
 pub mod simple;
 pub mod subsidy;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 
@@ -63,47 +63,48 @@ fn is_future(d: NaiveDate, deal: &Deal, cfg: &Config) -> bool {
     }
 }
 
+/// Отсортированный список дат без дублей. Вместо `BTreeSet`: одна аллокация
+/// на список — на миллионе сделок узлы дерева упирались в блокировку
+/// системного аллокатора и не давали потокам работать параллельно (B10).
+pub(crate) fn sorted_unique(mut v: Vec<NaiveDate>) -> Vec<NaiveDate> {
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// Все даты процентов, прошлые и будущие (§2.1): явный список → правило
 /// процентов → правило тела (не ENDDATE) → даты явного графика тела;
 /// всегда плюс дата погашения. Даты позже Tm отбрасываются.
 fn interest_dates_all(deal: &Deal) -> Vec<NaiveDate> {
-    let mut dates: BTreeSet<NaiveDate> = if !deal.interest_payment.is_empty() {
-        deal.interest_payment.iter().copied().collect()
+    let mut dates: Vec<NaiveDate> = if !deal.interest_payment.is_empty() {
+        deal.interest_payment.clone()
     } else if deal.interest_payment_rule.period_cd.is_some() {
         dates::rule_schedule(&deal.interest_payment_rule, deal.maturity_dttm)
-            .into_iter()
-            .collect()
     } else if matches!(
         deal.regular_payment_rule.period_cd,
         Some(PeriodCd::Months(_)) | Some(PeriodCd::Days(_))
     ) {
         dates::rule_schedule(&deal.regular_payment_rule, deal.maturity_dttm)
-            .into_iter()
-            .collect()
     } else if !deal.principal_payment.is_empty() {
         deal.principal_payment.iter().map(|(d, _)| *d).collect()
     } else {
-        BTreeSet::new()
+        Vec::new()
     };
-    dates.insert(deal.maturity_dttm);
-    dates
-        .into_iter()
-        .filter(|d| *d <= deal.maturity_dttm)
-        .collect()
+    dates.push(deal.maturity_dttm);
+    dates.retain(|d| *d <= deal.maturity_dttm);
+    sorted_unique(dates)
 }
 
 /// Все даты тела ANN/RGM (§2.1): правило тела (ENDDATE — пусто), иначе даты
 /// процентов; всегда плюс дата погашения. Явный график тела у ANN/RGM не
 /// используется (словарь §1: поле только для SIMPLE).
 fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate], cfg: &Config) -> Vec<NaiveDate> {
-    let mut dates: BTreeSet<NaiveDate> = match deal.regular_payment_rule.period_cd {
+    let mut dates: Vec<NaiveDate> = match deal.regular_payment_rule.period_cd {
         Some(PeriodCd::Months(_)) | Some(PeriodCd::Days(_)) => {
             dates::rule_schedule(&deal.regular_payment_rule, deal.maturity_dttm)
-                .into_iter()
-                .collect()
         }
-        Some(PeriodCd::EndDate) => BTreeSet::new(),
-        None => interest_all.iter().copied().collect(),
+        Some(PeriodCd::EndDate) => Vec::new(),
+        None => interest_all.to_vec(),
     };
     if cfg.clamp_principal_monthly {
         use chrono::Datelike;
@@ -111,24 +112,22 @@ fn principal_dates_all(deal: &Deal, interest_all: &[NaiveDate], cfg: &Config) ->
             !(d.year() == deal.maturity_dttm.year() && d.month() == deal.maturity_dttm.month())
         });
     }
-    dates.insert(deal.maturity_dttm);
-    dates
-        .into_iter()
-        .filter(|d| *d <= deal.maturity_dttm)
-        .collect()
+    dates.push(deal.maturity_dttm);
+    dates.retain(|d| *d <= deal.maturity_dttm);
+    sorted_unique(dates)
 }
 
 /// Все даты пересмотра ставки клиента (§2.1): явный список ∪ правило.
 /// Прошлые даты нужны для даты фиксинга (§6.2).
 pub(crate) fn client_repricing_all(deal: &Deal) -> Vec<NaiveDate> {
-    let mut out: BTreeSet<NaiveDate> = deal.repricing_dttm_schedule.iter().copied().collect();
+    let mut out = deal.repricing_dttm_schedule.clone();
     if deal.repricing_rule.period_cd.is_some() {
         out.extend(dates::rule_schedule(
             &deal.repricing_rule,
             deal.maturity_dttm,
         ));
     }
-    out.into_iter().collect()
+    sorted_unique(out)
 }
 
 // ---------- ставки (§6) --------------------------------------------------------------------
@@ -328,10 +327,10 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
                     *planned.entry(*d).or_insert(0.0) += a;
                 }
             }
-            let mut dates: BTreeSet<NaiveDate> =
+            let mut dates: Vec<NaiveDate> =
                 planned.keys().copied().filter(|d| *d <= maturity).collect();
-            dates.insert(maturity);
-            dates.into_iter().collect()
+            dates.push(maturity);
+            sorted_unique(dates)
         }
         _ => principal_dates_all(deal, &interest_all, cfg)
             .into_iter()
@@ -382,14 +381,16 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
     };
 
     // 3. Проход по объединённым будущим датам событий.
-    let points: BTreeSet<NaiveDate> = interest_future
-        .iter()
-        .chain(principal_future.iter())
-        .chain(repricing_future.iter())
-        .chain(prepay_map.keys())
-        .copied()
-        .collect();
-    let mut events: Vec<Event> = Vec::new();
+    let points = sorted_unique(
+        interest_future
+            .iter()
+            .chain(principal_future.iter())
+            .chain(repricing_future.iter())
+            .chain(prepay_map.keys())
+            .copied()
+            .collect(),
+    );
+    let mut events: Vec<Event> = Vec::with_capacity(points.len() * 2 + 2);
     let mut rate_used: f64;
     let mut base_used: Option<f64>;
 
