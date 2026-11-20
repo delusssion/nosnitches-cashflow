@@ -12,3 +12,7 @@
 ## engine/
 
 Реальный вывод движка `cfgen run` по 55 тестовым сделкам (`testdata/deals/test_deals.csv`, ключевая ставка `testdata/rates/key_rate.csv`), движок на коммите `884910e`: `cashflow.csv` и `errors.csv`. Тоже не эталон — это то, что сверяется с эталонами на экране «Сверка» (кнопка «Движок против эталонов»).
+
+## scenario/
+
+Демо для экрана «Сценарий: было / стало» — два прогона `cfgen run` по сделкам 7, 22, 25: `deals_before.csv` → `cashflow_before.csv` (как в тестовых данных) и `deals_after.csv` → `cashflow_after.csv`: сделка 22 — досрочка 250 000 ₽ 20.11.2022 (колонка `prepayment_schedule`), сделка 7 — ставка 15 % → 20 %, сделка 25 — cap 10 % → 20 %. Не эталон.

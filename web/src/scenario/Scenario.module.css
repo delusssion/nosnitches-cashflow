@@ -1,0 +1,25 @@
+.up {
+  color: var(--c-interest);
+  font-weight: 600;
+}
+
+.down {
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.changed {
+  color: var(--c-interest);
+  font-weight: 600;
+}
+
+.added {
+  color: var(--c-accent);
+  font-weight: 600;
+}
+
+.removed {
+  color: var(--c-error);
+  font-weight: 600;
+  text-decoration: line-through;
+}
