@@ -40,6 +40,14 @@ cfgen scenario --deals ../testdata/deals/test_deals.csv --rates ../testdata/rate
 | `--report-date` | из сделки | дата расчёта для всех сделок |
 | `--clamp-monthly` | выкл. | не больше одного платежа тела в месяц |
 | `--summary FILE` | — | сводка прогона в JSON: сделки, события, время, сделок/с |
+| `--curves FILE` | — | кривые прогноза индикатора от команды 2: после даты расчёта вместо H3 |
+| `--scenario NAME` | — | сценарий из файла кривых (колонка `scenario`): `base`, `stress`, … |
+
+Кривые команды 2: колонки `indicator,date,rate` (формат 2 контракта) или `indicator_code,rate_date,rate_value`, необязательная `scenario`. Значение кривой действует с даты до следующей точки; до первой точки кривой — H3. Сдвиг `--shift-bp` прибавляется и к кривой. Если в файле несколько сценариев, `--scenario` обязателен.
+
+```bash
+cfgen run --deals deals.csv --rates key_rate.csv --curves curves.csv --scenario stress --out-dir out_stress
+```
 
 Досрочные погашения — необязательная колонка `prepayment_schedule` в файле сделок (`дата,сумма` через пробел).
 
