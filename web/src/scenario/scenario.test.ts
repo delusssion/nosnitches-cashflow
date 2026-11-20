@@ -16,7 +16,8 @@ describe('сценарий «было / стало» (вывод движка)',
   });
 
   it('досрочка по сделке 22 экономит проценты и появляется новой строкой', () => {
-    expect(deal('22').dInterest).toBeCloseTo(68768.41 - 83551.0, 1);
+    expect(deal('22').dInterest).toBeCloseTo(72117.54 - 83551.0, 1);
+    expect(deal('22').closeShiftDays).toBe(0); // закрытие остаётся в дату погашения (B13)
     expect(deal('22').after!.prepayment).toBe(250000);
     const rows = diffRows(
       b.filter((e) => e.deal_id === '22'),
@@ -33,10 +34,12 @@ describe('сценарий «было / стало» (вывод движка)',
   });
 
   it('тело в сумме не меняется: досрочка перераспределяет его по датам', () => {
-    // суммы в CSV округлены до копеек — сумма строк может разойтись на копейку
-    expect(
-      Math.abs(deal('22').after!.principal - deal('22').before!.principal),
-    ).toBeLessThanOrEqual(0.011);
+    // суммы в CSV округлены до копеек: каждая строка тела может дать до полкопейки
+    const d22 = deal('22');
+    const rows = d22.after!.bodyPayments;
+    expect(Math.abs(d22.after!.principal - d22.before!.principal)).toBeLessThanOrEqual(
+      0.005 * rows + 1e-9,
+    );
   });
 
   it('путь остатка заканчивается нулём', () => {

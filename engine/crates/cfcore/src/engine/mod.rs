@@ -477,7 +477,9 @@ fn run_timeline(deal: &Deal, rates: &RateBook, cfg: &Config) -> Vec<Event> {
                     accrued = 0.0;
                 }
 
-                let n_rem = principal_future.iter().filter(|d| **d > p).count();
+                // Досрочка идёт раньше планового тела того же дня (порядок событий):
+                // если в дату p ещё будет плановый платёж, он входит в оставшиеся.
+                let n_rem = principal_future.iter().filter(|d| **d >= p).count();
                 if deal.discriminator == Discriminator::Ann && n_rem > 0 {
                     ann_payment = annuity(balance, rate, months, n_rem);
                 } else if deal.discriminator == Discriminator::Rgm && n_rem > 0 {
@@ -889,6 +891,53 @@ mod tests {
 
         let last = events.last().unwrap();
         assert_eq!(last.principal_after, 0.0);
+    }
+
+    #[test]
+    fn prepayment_on_principal_date_keeps_maturity_close() {
+        // Досрочка в плановую дату тела (20-е): RGM и ANN должны закрыться в дату
+        // погашения, а не на период раньше (баг: доля делилась на даты строго после p).
+        for disc in [Discriminator::Rgm, Discriminator::Ann] {
+            let mut dl = deal();
+            dl.discriminator = disc;
+            dl.interest_rate = 0.12;
+            dl.maturity_dttm = d("2023-04-30");
+            dl.regular_payment_rule = PaymentRule {
+                start_dttm: Some(d("2022-01-20")),
+                period_cd: Some(PeriodCd::Months(1)),
+                day_num: Some(20),
+            };
+            dl.prepayment_schedule = vec![(d("2022-11-20"), 250_000.0)];
+
+            let (events, _) = build_cashflow(&dl, &RateBook::new(), &cfg());
+            let close: Vec<&Event> = events
+                .iter()
+                .filter(|e| e.payment_type == PaymentType::ClosePayment)
+                .collect();
+            assert_eq!(close.len(), 1, "{disc:?}");
+            assert_eq!(close[0].payment_dttm, d("2023-04-30"), "{disc:?}");
+            let body: Vec<&Event> = events
+                .iter()
+                .filter(|e| e.payment_type == PaymentType::PrincipalPayment)
+                .collect();
+            assert!(
+                body.iter().all(|e| e.amount > 0.0),
+                "{disc:?}: нулевые платежи тела"
+            );
+            let total: f64 = events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.payment_type,
+                        PaymentType::PrincipalPayment
+                            | PaymentType::Prepayment
+                            | PaymentType::ClosePayment
+                    )
+                })
+                .map(|e| e.amount)
+                .sum();
+            assert!((total - dl.current_principal_amt).abs() < 1e-6, "{disc:?}");
+        }
     }
 
     #[test]
