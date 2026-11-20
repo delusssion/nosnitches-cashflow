@@ -106,6 +106,8 @@ report_dttm,discriminator,deal_id,currency_id,start_principal_amt,current_princi
 | `base_indicator`, `sub_float_indicator` | код индикатора, сейчас только `CBKEY1M` (ключевая ставка ЦБ) |
 | `indicator_lag_cd` | лаг индикатора, напр. `-1M` |
 
+**Необязательная 49-я колонка (спринт 3):** `prepayment_schedule` — досрочные погашения тела, пары `дата,сумма` через пробел (как `principal_payment`; суммы по модулю). Колонки может не быть: файл из 48 колонок остаётся корректным. Движок принимает и имя `prepayment`.
+
 ## Формат 2. Ставки — `testdata/rates/key_rate.csv`
 
 ```
@@ -113,6 +115,14 @@ indicator,date,rate
 CBKEY1M,2020-01-03,0.0625
 ```
 Ступенчатая функция: значение действует с `date` до следующей даты.
+
+## Формат 2б. Кривые прогноза — от команды 2 (спринт 3)
+
+```
+indicator,date,rate,scenario
+CBKEY1M,2022-09-01,0.10,stress
+```
+Колонки как в формате 2 (допускаются и имена `indicator_code,rate_date,rate_value`), плюс необязательная `scenario` (`base`, `stress`, …). Кривая — ступенчатая; после даты расчёта индикатор берётся с неё вместо H3, до её первой точки действует H3. Если в файле несколько сценариев, при расчёте выбирается один (`cfgen run --curves FILE --scenario NAME`).
 
 ## Формат 3. Результат калькулятора — кэшфлоу
 
@@ -125,7 +135,7 @@ report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principa
 | Колонка | Смысл |
 |---|---|
 | `event_order` | порядок события внутри сделки, с 1 |
-| `payment_type` | `interest_payment`, `principal_payment`, `close_payment`, `repricing`, `sub_payment`, `sub_repricing`, `prepayment` (зарезервировано, пока не генерируется) |
+| `payment_type` | `interest_payment`, `principal_payment`, `close_payment`, `repricing`, `sub_payment`, `sub_repricing`, `prepayment` (досрочное погашение из `prepayment_schedule`, спринт 3) |
 | `stream` | `client` — платежи клиента; `sub` — субсидия |
 | `amount` | сумма платежа со **знаком сделки** (депозит → отрицательные суммы); для `repricing`/`sub_repricing` = `0` |
 | `principal_before/after` | остаток тела до и после события (со знаком сделки) |
@@ -134,7 +144,7 @@ report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principa
 | `accrual_start_dttm/end_dttm` | период начисления процентов для `interest_payment`/`sub_payment`, иначе пусто |
 | `accrual_days`, `year_frac` | дни и доля года периода начисления |
 
-Порядок событий в один день: `repricing`/`sub_repricing` → `interest_payment` → `sub_payment` → `principal_payment` → `close_payment`.
+Порядок событий в один день: `repricing`/`sub_repricing` → `interest_payment` → `sub_payment` → `prepayment` → `principal_payment` → `close_payment`.
 
 Правила:
 - В выход попадают только события с `payment_dttm > report_dttm` (гипотеза H6: событие ровно в дату расчёта считается прошлым).
@@ -143,6 +153,8 @@ report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principa
 - Суммы в файле округлены до 2 знаков; внутри расчёта округления нет.
 
 Ошибки сделок — отдельный файл `errors.csv`: `deal_id,severity,code,field,message`. `severity`: `error` (сделка не посчитана) или `warning` (посчитана, но есть замечание).
+
+Коды: ошибки разбора строки — `MISSING_FIELD`, `BAD_DATE`, `BAD_NUMBER`, `BAD_PERIOD`, `UNKNOWN_DISCRIMINATOR`, `BAD_CSV`; сделки — `UNSUPPORTED_CURRENCY`, `MATURITY_BEFORE_REPORT`, `FLOAT_NO_INDICATOR` (error); `SCHEDULE_SUM_MISMATCH` (H9), `FLOAT_NO_REPRICING`, `DUPLICATE_PRINCIPAL_IN_MONTH` (warning).
 
 ## Формат 4. Эталон — `testdata/golden/deal_<id>.csv`
 
@@ -163,3 +175,5 @@ report_dttm,deal_id,event_order,payment_dttm,payment_type,stream,amount,principa
 | H7 | `ANN`: аннуитет пересчитывается от остатка на дату расчёта и при каждом репрайсинге; ставка периода = годовая × месяцы периода / 12 |
 | H8 | Выходные/праздники не переносим |
 | H9 | Если сумма явного графика тела ≠ остатку, разница уходит в `close_payment` в дату погашения + warning |
+| H10 | Досрочка уменьшает остаток, срок не меняется: ANN пересчитывает платёж, RGM — долю тела на оставшиеся даты (включая плановую дату тела в день досрочки); досрочка на весь остаток закрывает сделку |
+| H11 | «Не больше одного платежа тела в месяц» (замечание эксперта) — по флагу `--clamp-monthly`: плановая дата тела в месяце погашения схлопывается в `close_payment`; по умолчанию выключено |
