@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 use cfcore::engine::build_cashflow;
 use cfcore::io::{
-    format_deal, parse_deals, read_deals, read_rates, write_errors_csv, DealReader,
+    format_deal, parse_deals, read_curves, read_deals, read_rates, write_errors_csv, DealReader,
     CASHFLOW_HEADER, DEAL_COLUMNS,
 };
 use cfcore::model::{Discriminator, PaymentType, RateType};
@@ -73,6 +73,12 @@ enum Command {
         /// Сводка прогона в JSON: сделки, события, время, сделок/сек
         #[arg(long, value_name = "FILE")]
         summary: Option<PathBuf>,
+        /// Кривые прогноза индикатора от команды 2 (вместо H3 после даты расчёта)
+        #[arg(long, value_name = "FILE")]
+        curves: Option<PathBuf>,
+        /// Сценарий из файла кривых (колонка scenario): например base или stress
+        #[arg(long, value_name = "NAME", requires = "curves")]
+        scenario: Option<String>,
     },
     /// Сверить результат с эталонами: допуск 0,01 ₽, остаток после последнего платежа 0
     Verify {
@@ -142,6 +148,8 @@ fn main() -> Result<()> {
             shift_bp,
             report_date,
             summary,
+            curves,
+            scenario,
         } => run(&RunArgs {
             deals,
             rates,
@@ -152,6 +160,8 @@ fn main() -> Result<()> {
             shift_bp,
             report_date,
             summary,
+            curves,
+            scenario,
         }),
         Command::Verify {
             result,
@@ -1019,6 +1029,8 @@ struct RunArgs {
     shift_bp: f64,
     report_date: Option<String>,
     summary: Option<PathBuf>,
+    curves: Option<PathBuf>,
+    scenario: Option<String>,
 }
 
 /// Сводка прогона (`--summary`).
@@ -1033,6 +1045,8 @@ struct Summary {
     chunk: usize,
     seconds: f64,
     deals_per_sec: f64,
+    /// Сценарий ставок: кривая команды 2 или H3 со сдвигом.
+    rates_scenario: String,
 }
 
 /// Сделок в одном куске пачки, который целиком считает один поток.
@@ -1078,8 +1092,13 @@ struct ChunkOut {
 /// сделок ни было в файле. Вывод не зависит от числа потоков.
 fn run(args: &RunArgs) -> Result<()> {
     let started = Instant::now();
-    let book = read_rates(&args.rates)
+    let mut book = read_rates(&args.rates)
         .with_context(|| format!("чтение ставок {}", args.rates.display()))?;
+    if let Some(path) = &args.curves {
+        let curves = read_curves(path, args.scenario.as_deref())
+            .with_context(|| format!("чтение кривых {}", path.display()))?;
+        book.set_forecasts(curves);
+    }
     let report_override = args
         .report_date
         .as_deref()
@@ -1246,6 +1265,14 @@ fn run(args: &RunArgs) -> Result<()> {
     sum.chunk = args.chunk;
     sum.seconds = started.elapsed().as_secs_f64();
     sum.deals_per_sec = sum.deals_read as f64 / sum.seconds.max(1e-9);
+    sum.rates_scenario = match (&args.curves, &args.scenario) {
+        (Some(p), Some(s)) => format!("кривая {} · {s}", p.display()),
+        (Some(p), None) => format!("кривая {}", p.display()),
+        _ => "H3: значение на дату расчёта".into(),
+    };
+    if args.shift_bp != 0.0 {
+        sum.rates_scenario += &format!(" {:+} б.п.", args.shift_bp);
+    }
     let line = format!(
         "сделок: {} | посчитано: {} | с ошибками: {} | предупреждений: {} | событий: {} | потоков: {} | {:.2} с | {:.0} сделок/с",
         sum.deals_read,

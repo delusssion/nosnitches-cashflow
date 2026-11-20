@@ -12,6 +12,9 @@ use crate::dates;
 pub struct RateSeries {
     pub indicator: String,
     steps: Vec<(NaiveDate, f64)>,
+    /// Прогноз после даты расчёта — кривая команды 2 (базовый или стресс-сценарий).
+    /// Пусто — действует H3: последнее известное значение на дату расчёта.
+    forecast: Vec<(NaiveDate, f64)>,
 }
 
 impl RateSeries {
@@ -30,7 +33,19 @@ impl RateSeries {
         Self {
             indicator: indicator.into(),
             steps: deduped,
+            forecast: Vec::new(),
         }
+    }
+
+    /// Подключить кривую прогноза (команда 2). Ступенчатая, как история.
+    pub fn with_forecast(mut self, steps: Vec<(NaiveDate, f64)>) -> Self {
+        self.forecast = RateSeries::new(self.indicator.clone(), steps).steps;
+        self
+    }
+
+    /// Есть ли у серии кривая прогноза.
+    pub fn has_forecast(&self) -> bool {
+        !self.forecast.is_empty()
     }
 
     /// Значение индикатора на дату. Для дат позже последнего известного шага
@@ -54,16 +69,21 @@ impl RateSeries {
     }
 
     /// Значение индикатора для фиксинга на дату `at` с лагом `lag_months`.
-    /// Смотр не дальше даты расчёта `report`: для будущих дат берётся
-    /// последнее известное на дату расчёта + сдвиг сценария (H3) — история
-    /// после даты расчёта не «подглядывается».
+    /// Смотр не дальше даты расчёта `report`: история после даты расчёта не
+    /// «подглядывается». Для будущих дат — значение кривой прогноза (команда 2),
+    /// если она есть и уже началась, иначе последнее известное на дату расчёта
+    /// (H3); в обоих случаях плюс сдвиг сценария.
     pub fn fixing(&self, at: NaiveDate, lag_months: i32, report: NaiveDate, shift: f64) -> f64 {
         let look = dates::add_months(at, lag_months);
-        if look >= report {
-            self.value_on(report) + shift
-        } else {
-            self.value_on(look)
+        if look < report {
+            return self.value_on(look);
         }
+        let i = self.forecast.partition_point(|(d, _)| *d <= look);
+        let base = match i.checked_sub(1) {
+            Some(k) => self.forecast[k].1,
+            None => self.value_on(report),
+        };
+        base + shift
     }
 
     /// Первый и последний шаг серии (для сводки прогона).
@@ -88,6 +108,18 @@ impl RateBook {
 
     pub fn insert(&mut self, s: RateSeries) {
         self.series.insert(s.indicator.clone(), s);
+    }
+
+    /// Подключить кривые прогноза по индикаторам. Кривая без истории индикатора
+    /// становится серией только из прогноза (до неё значение — первое на кривой).
+    pub fn set_forecasts(&mut self, curves: BTreeMap<String, Vec<(NaiveDate, f64)>>) {
+        for (indicator, steps) in curves {
+            let series = match self.series.remove(&indicator) {
+                Some(s) => s.with_forecast(steps),
+                None => RateSeries::new(indicator.clone(), steps.clone()).with_forecast(steps),
+            };
+            self.series.insert(indicator, series);
+        }
     }
 
     pub fn get(&self, indicator: &str) -> Option<&RateSeries> {
@@ -192,5 +224,23 @@ mod tests {
         assert!(book.get("CBKEY1M").is_some());
         assert!(book.get("XXX").is_none());
         assert_eq!(book.len(), 1);
+    }
+
+    #[test]
+    fn forecast_curve_replaces_h3_after_report() {
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let report = d("2022-08-31");
+        let s = RateSeries::new("CBKEY1M", vec![(d("2022-07-25"), 0.08)])
+            .with_forecast(vec![(d("2022-10-01"), 0.10), (d("2023-01-01"), 0.12)]);
+        assert!(s.has_forecast());
+        // до даты расчёта — история
+        assert_eq!(s.fixing(d("2022-08-01"), 0, report, 0.0), 0.08);
+        // после даты расчёта, но до начала кривой — H3
+        assert_eq!(s.fixing(d("2022-09-15"), 0, report, 0.0), 0.08);
+        // на кривой — значение кривой (+ сдвиг сценария)
+        assert_eq!(s.fixing(d("2022-11-15"), 0, report, 0.0), 0.10);
+        assert!((s.fixing(d("2023-02-01"), 0, report, 0.01) - 0.13).abs() < 1e-12);
+        // лаг смотрит назад: 2023-01-15 −1M → 2022-12-15 → 0.10
+        assert_eq!(s.fixing(d("2023-01-15"), -1, report, 0.0), 0.10);
     }
 }

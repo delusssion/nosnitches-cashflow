@@ -414,6 +414,105 @@ fn parse_rates<R: Read>(rdr: R) -> Result<RateBook, RowError> {
     Ok(book)
 }
 
+// ---------- кривые прогноза команды 2 (B14) ----------
+
+/// Кривые прогноза индикатора (команда 2) по индикаторам.
+pub type Curves = BTreeMap<String, Vec<(NaiveDate, f64)>>;
+
+/// Прочитать кривые прогноза. Колонки — `indicator,date,rate` (формат 2
+/// контракта) или `indicator_code,rate_date,rate_value`; необязательная колонка
+/// `scenario`: если она есть, берётся только строка сценария `scenario`.
+pub fn read_curves(path: &std::path::Path, scenario: Option<&str>) -> Result<Curves, ParseError> {
+    let file = io::BufReader::new(std::fs::File::open(path).map_err(|e| ParseError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?);
+    parse_curves(file, scenario).map_err(|e| match e {
+        RowError::Csv(err) => ParseError::from_csv(&path.display().to_string(), err),
+        RowError::Msg { line, message } => ParseError::Row {
+            path: path.display().to_string(),
+            line,
+            message,
+        },
+    })
+}
+
+/// Разбор кривых из потока (см. [`read_curves`]).
+pub fn parse_curves<R: Read>(rdr: R, scenario: Option<&str>) -> Result<Curves, RowError> {
+    let mut reader = ReaderBuilder::new().from_reader(rdr);
+    let header = reader.headers().map_err(RowError::Csv)?.clone();
+    let find = |names: &[&str]| {
+        header
+            .iter()
+            .position(|h| names.contains(&h.trim().trim_start_matches('\u{feff}')))
+    };
+    let (Some(i_ind), Some(i_date), Some(i_rate)) = (
+        find(&["indicator", "indicator_code"]),
+        find(&["date", "rate_date"]),
+        find(&["rate", "rate_value"]),
+    ) else {
+        return Err(RowError::Msg {
+            line: 1,
+            message:
+                "ожидаются колонки indicator,date,rate или indicator_code,rate_date,rate_value"
+                    .into(),
+        });
+    };
+    let i_scen = find(&["scenario", "scenario_cd"]);
+    if scenario.is_some() && i_scen.is_none() {
+        return Err(RowError::Msg {
+            line: 1,
+            message: "задан сценарий, но в файле кривых нет колонки scenario".into(),
+        });
+    }
+
+    let mut curves: Curves = BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for rec in reader.records() {
+        let rec = rec.map_err(RowError::Csv)?;
+        let line = rec
+            .position()
+            .map(|p| usize::try_from(p.line()).unwrap_or(0))
+            .unwrap_or(0);
+        if let Some(i) = i_scen {
+            let scen = rec.get(i).unwrap_or("").trim();
+            seen.insert(scen.to_string());
+            if scenario != Some(scen) {
+                continue;
+            }
+        }
+        let indicator = rec.get(i_ind).unwrap_or("").trim();
+        if indicator.is_empty() {
+            return Err(RowError::Msg {
+                line,
+                message: "пустой indicator".into(),
+            });
+        }
+        let date = parse_date(rec.get(i_date).unwrap_or(""), "date")
+            .map_err(|m| RowError::Msg { line, message: m })?;
+        let rate_s = rec.get(i_rate).unwrap_or("");
+        let rate: f64 = rate_s.trim().parse().map_err(|_| RowError::Msg {
+            line,
+            message: format!("поле rate: «{rate_s}» не число"),
+        })?;
+        curves
+            .entry(indicator.to_string())
+            .or_default()
+            .push((date, rate));
+    }
+    if i_scen.is_some() && curves.is_empty() {
+        let list = seen.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(RowError::Msg {
+            line: 1,
+            message: match scenario {
+                None => format!("в файле несколько сценариев ({list}) — выберите один: --scenario"),
+                Some(s) => format!("сценария «{s}» нет в файле, есть: {list}"),
+            },
+        });
+    }
+    Ok(curves)
+}
+
 // ---------- запись результатов ----------
 
 /// Заголовок файла кэшфлоу (формат 3 контракта).
@@ -752,6 +851,33 @@ mod tests {
         assert_eq!(DEAL_COLUMNS[47], "sub_indicator_lag_cd");
         assert_eq!(DEAL_COLUMNS.len(), 48);
         assert_eq!(CASHFLOW_HEADER.len(), 16);
+    }
+
+    #[test]
+    fn curves_with_scenarios() {
+        let csv = "rate_date,indicator_code,rate_value,scenario\n\
+                   2022-10-01,CBKEY1M,0.08,base\n\
+                   2022-10-01,CBKEY1M,0.10,stress\n\
+                   2023-01-01,CBKEY1M,0.12,stress\n";
+        let stress = parse_curves(csv.as_bytes(), Some("stress")).unwrap();
+        assert_eq!(stress["CBKEY1M"].len(), 2);
+        let base = parse_curves(csv.as_bytes(), Some("base")).unwrap();
+        assert_eq!(base["CBKEY1M"].len(), 1);
+        // сценарий не выбран — ошибка со списком сценариев
+        match parse_curves(csv.as_bytes(), None) {
+            Err(RowError::Msg { message, .. }) => assert!(message.contains("base, stress")),
+            other => panic!("ожидалась ошибка, получено {other:?}"),
+        }
+        // формат 2 контракта без сценариев
+        let plain = parse_curves(
+            "indicator,date,rate\nCBKEY1M,2022-10-01,0.09\n".as_bytes(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            plain["CBKEY1M"],
+            vec![(NaiveDate::from_ymd_opt(2022, 10, 1).unwrap(), 0.09)]
+        );
     }
 
     #[test]
