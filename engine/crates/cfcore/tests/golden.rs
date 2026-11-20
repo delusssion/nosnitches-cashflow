@@ -58,23 +58,59 @@ fn parse_rows(csv_text: &str) -> BTreeMap<String, Row> {
 
 #[test]
 fn engine_matches_analyst_goldens() {
+    check_goldens(
+        "testdata/deals/test_deals.csv",
+        "testdata/golden",
+        &Config::default(),
+        13,
+    );
+}
+
+/// Спринт 3: досрочки (H10) — входные сделки с колонкой prepayment_schedule.
+#[test]
+fn engine_matches_prepay_scenario_goldens() {
+    check_goldens(
+        "testdata/golden/scenarios/prepay/input/deals.csv",
+        "testdata/golden/scenarios/prepay",
+        &Config::default(),
+        6,
+    );
+}
+
+/// Спринт 3: стресс-сдвиг ключевой ставки +200 б.п. после даты расчёта (H3).
+#[test]
+fn engine_matches_shift200_scenario_goldens() {
+    let cfg = Config {
+        scenario_shift: 0.02,
+        ..Config::default()
+    };
+    check_goldens(
+        "testdata/golden/scenarios/shift200/input/deals.csv",
+        "testdata/golden/scenarios/shift200",
+        &cfg,
+        8,
+    );
+}
+
+fn check_goldens(deals_file: &str, golden_rel: &str, cfg: &Config, min_files: usize) {
     let deals = parse_deals(Cursor::new(
-        std::fs::read_to_string(repo_path("testdata/deals/test_deals.csv"))
-            .expect("test_deals.csv"),
+        std::fs::read_to_string(repo_path(deals_file)).expect("файл сделок"),
     ))
     .expect("сделки читаются");
     let book: RateBook = read_rates(repo_path("testdata/rates/key_rate.csv").as_ref())
         .expect("история ключевой ставки читается");
-    let cfg = Config::default();
 
-    let golden_dir = repo_path("testdata/golden");
+    let golden_dir = repo_path(golden_rel);
     let mut golden_files: Vec<std::path::PathBuf> = std::fs::read_dir(&golden_dir)
         .expect("каталог эталонов")
         .map(|e| e.expect("файл эталона").path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "csv"))
         .collect();
     golden_files.sort();
-    assert!(golden_files.len() >= 13, "эталонов должно быть хотя бы 13");
+    assert!(
+        golden_files.len() >= min_files,
+        "{golden_rel}: эталонов должно быть хотя бы {min_files}"
+    );
 
     let mut failures: Vec<String> = Vec::new();
     for path in &golden_files {
@@ -88,7 +124,7 @@ fn engine_matches_analyst_goldens() {
             failures.push(format!("сделка {deal_id}: нет в test_deals.csv"));
             continue;
         };
-        let (events, errs) = build_cashflow(deal, &book, &cfg);
+        let (events, errs) = build_cashflow(deal, &book, cfg);
         if errs.iter().any(|e| e.severity == cfcore::Severity::Error) {
             failures.push(format!("сделка {deal_id}: ошибки {errs:?}"));
             continue;
@@ -153,6 +189,9 @@ fn engine_matches_analyst_goldens() {
     }
 
     if !failures.is_empty() {
-        panic!("расхождения с эталонами:\n{}", failures.join("\n"));
+        panic!(
+            "{golden_rel}: расхождения с эталонами:\n{}",
+            failures.join("\n")
+        );
     }
 }

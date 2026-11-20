@@ -120,12 +120,12 @@ pub fn build(deal: &Deal, rates: &RateBook, cfg: &Config, client: &[Event]) -> V
     }
     let mut last_sub = sub_start;
 
-    // Путь остатка тела из клиентских событий (база начисления — H4).
+    // Путь остатка тела из клиентских событий (база начисления — H4), включая досрочки.
     let mut steps: Vec<(NaiveDate, f64)> = vec![(report, deal.current_principal_amt)];
     for e in client {
         if matches!(
             e.payment_type,
-            PaymentType::PrincipalPayment | PaymentType::ClosePayment
+            PaymentType::PrincipalPayment | PaymentType::ClosePayment | PaymentType::Prepayment
         ) {
             steps.push((e.payment_dttm, e.principal_after));
         }
@@ -147,7 +147,9 @@ pub fn build(deal: &Deal, rates: &RateBook, cfg: &Config, client: &[Event]) -> V
             .filter(|e| {
                 matches!(
                     e.payment_type,
-                    PaymentType::PrincipalPayment | PaymentType::ClosePayment
+                    PaymentType::PrincipalPayment
+                        | PaymentType::ClosePayment
+                        | PaymentType::Prepayment
                 )
             })
             .map(|e| e.payment_dttm)
