@@ -41,6 +41,7 @@ const FIELDS: [keyof Deal, string, Kind][] = [
   ['sub_payment_rule_day_num', 'Субсидия: число', 'text'],
   ['sub_cap_limit_interest_rate', 'Субсидия: cap', 'rate'],
   ['sub_floor_limit_interest_rate', 'Субсидия: floor', 'rate'],
+  ['prepayment_schedule', 'Досрочные погашения', 'text'],
 ];
 const KNOWN = new Set<string>(FIELDS.map(([k]) => k));
 

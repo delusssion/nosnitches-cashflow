@@ -23,6 +23,10 @@ interface DealRow {
   principalTotal: number;
   interestTotal: number;
   subsidyTotal: number;
+  prepaymentTotal: number;
+  /** Коды замечаний движка из errors.csv. */
+  issues: string[];
+  hasError: boolean;
   lastDate: string;
   nonZero: boolean;
 }
@@ -63,6 +67,21 @@ const COLUMNS = [
     meta: { width: '140px' },
     cell: (c) => fmtDate(c.getValue()),
   }),
+  col.accessor((r) => r.issues.join(' '), {
+    id: 'issues',
+    header: 'Замечания движка',
+    meta: { width: 'minmax(150px, 1.2fr)' },
+    cell: (c) => {
+      const r = c.row.original;
+      if (!r.issues.length) return <span className={ui.muted}>—</span>;
+      return (
+        <span className={r.hasError ? ui.warn : ui.muted} title={r.issues.join(', ')}>
+          {r.hasError ? '✗ ' : '⚠ '}
+          {r.issues.join(', ')}
+        </span>
+      );
+    },
+  }),
   col.accessor('nonZero', {
     header: 'Остаток',
     meta: { width: '80px' },
@@ -102,16 +121,17 @@ function LoadStatus({ load }: { load?: LoadState }) {
 }
 
 export function PortfolioPage() {
-  const { cashflow, deals, loads, loadFile, loadDemo } = useData();
+  const { cashflow, deals, issues, loads, loadFile, loadDemo } = useData();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [disc, setDisc] = useState('');
 
   const rows = useMemo<DealRow[]>(() => {
     if (!cashflow) return [];
-    return cashflow.summaries.map((s) => {
+    const out: DealRow[] = cashflow.summaries.map((s) => {
       const deal = deals?.get(s.dealId);
       const first = cashflow.byDeal.get(s.dealId)?.[0];
+      const dealIssues = issues?.get(s.dealId) ?? [];
       return {
         dealId: s.dealId,
         discriminator: deal?.discriminator ?? first?.discriminator ?? '—',
@@ -120,20 +140,58 @@ export function PortfolioPage() {
         principalTotal: s.principalTotal,
         interestTotal: s.interestTotal,
         subsidyTotal: s.subsidyTotal,
+        prepaymentTotal: s.prepaymentTotal,
+        issues: dealIssues.map((i) => i.code),
+        hasError: dealIssues.some((i) => i.severity === 'error'),
         lastDate: s.lastDate ?? '',
         nonZero: s.finalBalanceNonZero,
       };
     });
-  }, [cashflow, deals]);
+    // Сделки, отклонённые движком (error), в кэшфлоу не попадают — показываем их строкой с замечанием.
+    if (issues) {
+      const seen = new Set(out.map((r) => r.dealId));
+      for (const [id, list] of issues) {
+        if (!id || seen.has(id) || !list.some((i) => i.severity === 'error')) continue;
+        const deal = deals?.get(id);
+        out.push({
+          dealId: id,
+          discriminator: deal?.discriminator ?? '—',
+          rateType: deal?.rate_type_cd ?? '—',
+          eventCount: 0,
+          principalTotal: 0,
+          interestTotal: 0,
+          subsidyTotal: 0,
+          prepaymentTotal: 0,
+          issues: list.map((i) => i.code),
+          hasError: true,
+          lastDate: '',
+          nonZero: false,
+        });
+      }
+    }
+    return out;
+  }, [cashflow, deals, issues]);
 
   const totals = useMemo(() => {
-    const t = { events: 0, principal: 0, interest: 0, subsidy: 0, nonZero: 0 };
+    const t = {
+      events: 0,
+      principal: 0,
+      interest: 0,
+      subsidy: 0,
+      prepayment: 0,
+      nonZero: 0,
+      rejected: 0,
+      warned: 0,
+    };
     for (const r of rows) {
       t.events += r.eventCount;
       t.principal += r.principalTotal;
       t.interest += r.interestTotal;
       t.subsidy += r.subsidyTotal;
+      t.prepayment += r.prepaymentTotal;
       if (r.nonZero) t.nonZero += 1;
+      if (r.hasError) t.rejected += 1;
+      else if (r.issues.length) t.warned += 1;
     }
     return t;
   }, [rows]);
@@ -201,9 +259,23 @@ export function PortfolioPage() {
     <section className={styles.page}>
       <div className={styles.toolbar}>
         <h1 className={styles.title}>Портфель</h1>
-        <button className={ui.button} onClick={() => void loadDemo()} disabled={busy}>
-          Загрузить демо
-        </button>
+        <div className={styles.row}>
+          <button
+            className={ui.buttonGhost}
+            onClick={() => void loadDemo('samples')}
+            disabled={busy}
+          >
+            Загрузить демо
+          </button>
+          <button
+            className={ui.button}
+            onClick={() => void loadDemo('engine')}
+            disabled={busy}
+            title="Вывод cfgen по 55 тестовым сделкам: кэшфлоу, сделки и errors.csv"
+          >
+            Результат движка: 55 сделок
+          </button>
+        </div>
       </div>
 
       <div className={styles.grid2}>
@@ -225,6 +297,15 @@ export function PortfolioPage() {
           />
           <LoadStatus load={loads.deals} />
         </div>
+        <div>
+          <DropZone
+            title="Перетащите errors.csv"
+            hint="необязательно: замечания движка по сделкам"
+            fileName={loads.errors?.fileName}
+            onFiles={onFiles('errors')}
+          />
+          <LoadStatus load={loads.errors} />
+        </div>
       </div>
 
       {cashflow && (
@@ -235,11 +316,21 @@ export function PortfolioPage() {
             <StatTile label="сумма тела, ₽" value={fmtMoney(totals.principal)} />
             <StatTile label="сумма процентов, ₽" value={fmtMoney(totals.interest)} />
             <StatTile label="сумма субсидии, ₽" value={fmtMoney(totals.subsidy)} />
+            {totals.prepayment !== 0 && (
+              <StatTile label="досрочно погашено, ₽" value={fmtMoney(totals.prepayment)} />
+            )}
             <StatTile
               label="с ненулевым остатком"
               value={fmtInt(totals.nonZero)}
               danger={totals.nonZero > 0}
             />
+            {issues && (
+              <StatTile
+                label="отклонено / с предупреждением"
+                value={`${fmtInt(totals.rejected)} / ${fmtInt(totals.warned)}`}
+                danger={totals.rejected > 0}
+              />
+            )}
           </div>
 
           <div className={ui.panel}>

@@ -5,7 +5,7 @@ import { EChart } from '../components/EChart';
 import ui from '../components/ui.module.css';
 import { VirtualTable, type ColumnMeta } from '../components/VirtualTable';
 import { cashflowToCsv, downloadText } from '../data/exportCsv';
-import type { CashflowEvent, PaymentType } from '../data/types';
+import type { CashflowEvent, EngineIssue, PaymentType } from '../data/types';
 import { DealParams } from '../deal/DealParams';
 import dealStyles from '../deal/Deal.module.css';
 import { PAYMENT_TYPE_INFO, PAYMENT_TYPES } from '../deal/paymentTypes';
@@ -80,6 +80,28 @@ function buildColumns(totals: { amount: number; count: number }) {
   ];
 }
 
+/** Замечания движка по сделке (errors.csv): ошибка — сделка не посчитана, предупреждение — посчитана. */
+function IssuesPanel({ issues }: { issues: EngineIssue[] }) {
+  if (!issues.length) return null;
+  return (
+    <div className={ui.panel}>
+      <h2 className={ui.panelTitle}>Замечания движка</h2>
+      <ul className={dealStyles.issues}>
+        {issues.map((i, k) => (
+          <li key={k}>
+            <span className={i.severity === 'error' ? ui.warn : ui.muted}>
+              {i.severity === 'error' ? '✗ ошибка' : '⚠ предупреждение'}
+            </span>{' '}
+            <span className={ui.mono}>{i.code}</span>
+            {i.field && <span className={ui.muted}> · {i.field}</span>}
+            {i.message && <> — {i.message}</>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function NoDeal() {
   const { cashflow, loadDemo } = useData();
   if (!cashflow) {
@@ -115,7 +137,8 @@ function NoDeal() {
 
 export function DealPage() {
   const { id } = useParams();
-  const { cashflow, deals } = useData();
+  const { cashflow, deals, issues } = useData();
+  const dealIssues = (id && issues?.get(id)) || [];
   const [hidden, setHidden] = useState<Set<PaymentType>>(new Set());
 
   const events = useMemo(() => (id && cashflow?.byDeal.get(id)) || [], [cashflow, id]);
@@ -144,6 +167,7 @@ export function DealPage() {
         <section className={styles.page}>
           <h1 className={styles.title}>Сделка {id}</h1>
           <p className={styles.hint}>Нет событий по этой сделке в загруженном кэшфлоу.</p>
+          <IssuesPanel issues={dealIssues} />
         </section>
       );
     }
@@ -171,6 +195,8 @@ export function DealPage() {
           Скачать CSV сделки
         </button>
       </div>
+
+      <IssuesPanel issues={dealIssues} />
 
       {deal && (
         <div className={ui.panel}>

@@ -74,4 +74,11 @@ describe('сверка с эталоном', () => {
     expect(lines).toHaveLength(golden.length + 1);
     expect(lines[1]).toContain(',match,');
   });
+
+  it('сделки движка без эталона не сверяются, а считаются', () => {
+    const engine = [...clone(), { ...golden[0]!, deal_id: 'NO-GOLDEN' }];
+    const res = compareCashflows(engine, golden);
+    expect(res.skippedDeals).toBe(1);
+    expect(res.rows.every((r) => r.status === 'match')).toBe(true);
+  });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CashflowEvent, CsvKind, Deal, RowTypes, ValidationError } from './types';
+import type { CashflowEvent, CsvKind, Deal, EngineIssue, RowTypes, ValidationError } from './types';
 
 z.config(z.locales.ru());
 
@@ -7,8 +7,9 @@ z.config(z.locales.ru());
 // Колонки описаны одной таблицей: из неё строятся и zod-схема (источник сообщений об ошибках),
 // и быстрый разборщик для горячего пути — zod на 500 000 строк заметно медленнее.
 
+// req — значение обязательно; opt — колонки может не быть в заголовке (необязательная колонка).
 type ColumnSpec =
-  | { t: 'date' | 'num' | 'int' | 'uint' | 'str'; req?: true }
+  | { t: 'date' | 'num' | 'int' | 'uint' | 'str'; req?: true; opt?: true }
   | { t: 'enum'; values: readonly string[]; req?: true };
 
 const date = { t: 'date' } as const;
@@ -100,12 +101,28 @@ export const DEAL_COLUMNS = {
   sub_repricing_rule_first_event_flg: str,
   indicator_lag_cd: str,
   sub_indicator_lag_cd: str,
+  prepayment_schedule: { t: 'str', opt: true },
 } satisfies Record<keyof Deal, ColumnSpec>;
+
+export const ERRORS_COLUMNS = {
+  deal_id: str,
+  severity: oneOf(['error', 'warning']),
+  code: reqStr,
+  field: str,
+  message: str,
+} satisfies Record<keyof EngineIssue, ColumnSpec>;
 
 export const COLUMNS: Record<CsvKind, Record<string, ColumnSpec>> = {
   cashflow: CASHFLOW_COLUMNS,
   deals: DEAL_COLUMNS,
+  errors: ERRORS_COLUMNS,
 };
+
+/** Колонки, которые обязаны быть в заголовке файла. */
+export const requiredColumns = (kind: CsvKind) =>
+  Object.entries(COLUMNS[kind])
+    .filter(([, spec]) => !('opt' in spec && spec.opt))
+    .map(([name]) => name);
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const NUMBER = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/;
@@ -156,8 +173,9 @@ const zodObject = <T>(columns: Record<string, ColumnSpec>) =>
 
 export const cashflowSchema = zodObject<CashflowEvent>(CASHFLOW_COLUMNS);
 export const dealSchema = zodObject<Deal>(DEAL_COLUMNS);
+export const errorsSchema = zodObject<EngineIssue>(ERRORS_COLUMNS);
 
-export const SCHEMAS = { cashflow: cashflowSchema, deals: dealSchema };
+export const SCHEMAS = { cashflow: cashflowSchema, deals: dealSchema, errors: errorsSchema };
 
 // --- быстрый разбор ---
 

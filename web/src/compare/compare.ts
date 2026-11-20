@@ -38,6 +38,8 @@ export interface CompareResult {
   rows: CompareRow[];
   deals: DealCompare[];
   tolerance: number;
+  /** Сделки движка, для которых нет эталона: не сверяются (как `cfgen verify`). */
+  skippedDeals: number;
 }
 
 // Сумма 100.01 − 100 даёт 0.010000000000005 > 0.01: сравниваем с запасом на ошибку double.
@@ -70,7 +72,11 @@ export function compareCashflows(
   golden: CashflowEvent[],
   tolerance = 0.01,
 ): CompareResult {
-  const eng = group(engine);
+  // Эталон — по сделке на файл: сверяем только сделки, у которых он есть.
+  const goldenDeals = new Set(golden.map((e) => e.deal_id));
+  const engineDeals = new Set(engine.map((e) => e.deal_id));
+  const skippedDeals = [...engineDeals].filter((d) => !goldenDeals.has(d)).length;
+  const eng = group(engine.filter((e) => goldenDeals.has(e.deal_id)));
   const gold = group(golden);
   const keys = new Set([...gold.keys(), ...eng.keys()]);
   const rows: CompareRow[] = [];
@@ -139,7 +145,7 @@ export function compareCashflows(
     d.maxAbsDelta = Math.max(d.maxAbsDelta, Math.abs(r.dAmount ?? 0), Math.abs(r.dPrincipal ?? 0));
   }
 
-  return { rows, deals: [...byDeal.values()], tolerance };
+  return { rows, deals: [...byDeal.values()], tolerance, skippedDeals };
 }
 
 const REPORT_COLUMNS = [

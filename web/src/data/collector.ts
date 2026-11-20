@@ -1,4 +1,4 @@
-import { COLUMNS, parseRow } from './schemas';
+import { parseRow, requiredColumns } from './schemas';
 import type { CsvKind, RowTypes, ValidationError } from './types';
 
 /** Сколько ошибок храним; остальные только считаем. */
@@ -16,7 +16,7 @@ export interface ParseResult<K extends CsvKind> {
 /** Копит провалидированные строки и ошибки. Используется и в Web Worker, и в синхронном разборе. */
 export function createCollector<K extends CsvKind>(kind: K) {
   const result: ParseResult<K> = { rows: [], errors: [], errorCount: 0, rowCount: 0 };
-  const required = Object.keys(COLUMNS[kind]);
+  const required = requiredColumns(kind);
 
   const addError = (e: ValidationError) => {
     result.errorCount += 1;

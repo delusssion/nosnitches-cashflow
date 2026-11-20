@@ -12,6 +12,8 @@ export interface DealSummary {
   interestTotal: number;
   /** Субсидия (stream=sub). */
   subsidyTotal: number;
+  /** Досрочные погашения (prepayment) — входят и в principalTotal. */
+  prepaymentTotal: number;
   lastDate: IsoDate | null;
   finalBalance: number | null;
   finalBalanceNonZero: boolean;
@@ -43,6 +45,7 @@ export function summarizeDeal(dealId: string, events: CashflowEvent[]): DealSumm
   let principalTotal = 0;
   let interestTotal = 0;
   let subsidyTotal = 0;
+  let prepaymentTotal = 0;
   for (const e of events) {
     if (e.stream === 'sub') {
       subsidyTotal += e.amount;
@@ -50,6 +53,7 @@ export function summarizeDeal(dealId: string, events: CashflowEvent[]): DealSumm
       interestTotal += e.amount;
     } else if (BODY_TYPES.has(e.payment_type)) {
       principalTotal += e.amount;
+      if (e.payment_type === 'prepayment') prepaymentTotal += e.amount;
     }
   }
   const last = events.at(-1);
@@ -60,6 +64,7 @@ export function summarizeDeal(dealId: string, events: CashflowEvent[]): DealSumm
     principalTotal,
     interestTotal,
     subsidyTotal,
+    prepaymentTotal,
     lastDate: last?.payment_dttm ?? null,
     finalBalance,
     finalBalanceNonZero: finalBalance !== null && Math.abs(finalBalance) > BALANCE_EPS,
