@@ -2,18 +2,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use cfcore::engine::build_cashflow;
 use cfcore::io::{
-    parse_deals, read_deals, read_rates, write_errors_csv, CashflowWriter, DEAL_COLUMNS,
+    format_deal, parse_deals, read_deals, read_rates, write_errors_csv, DealReader,
+    CASHFLOW_HEADER, DEAL_COLUMNS,
 };
 use cfcore::model::{Discriminator, PaymentType, RateType};
-use cfcore::{Config, Deal, Event, Severity};
+use cfcore::{generate, Config, Deal, DealError, Event, Severity};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
+use serde::Serialize;
 
 // ANSI-цвета для терминала
 const RESET: &str = "\x1b[0m";
@@ -51,6 +58,21 @@ enum Command {
         /// Ограничение: не более 1 платежа тела в календарный месяц
         #[arg(long)]
         clamp_monthly: bool,
+        /// Потоков расчёта (по умолчанию — все ядра)
+        #[arg(long)]
+        threads: Option<usize>,
+        /// Сделок в пачке: столько читается, считается параллельно и пишется за раз
+        #[arg(long, default_value_t = 4096)]
+        chunk: usize,
+        /// Сдвиг сценария к будущим значениям индикатора, б.п. (H3)
+        #[arg(long, default_value_t = 0.0)]
+        shift_bp: f64,
+        /// Дата расчёта для всех сделок (по умолчанию — report_dttm из сделки)
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        report_date: Option<String>,
+        /// Сводка прогона в JSON: сделки, события, время, сделок/сек
+        #[arg(long, value_name = "FILE")]
+        summary: Option<PathBuf>,
     },
     /// Сверить результат с эталонами: допуск 0,01 ₽, остаток после последнего платежа 0
     Verify {
@@ -115,7 +137,22 @@ fn main() -> Result<()> {
             rates,
             out_dir,
             clamp_monthly,
-        } => run(&deals, &rates, &out_dir, clamp_monthly),
+            threads,
+            chunk,
+            shift_bp,
+            report_date,
+            summary,
+        } => run(&RunArgs {
+            deals,
+            rates,
+            out_dir,
+            clamp_monthly,
+            threads,
+            chunk: chunk.max(1),
+            shift_bp,
+            report_date,
+            summary,
+        }),
         Command::Verify {
             result,
             golden_dir,
@@ -850,86 +887,6 @@ fn load_deals(path: &Path) -> Result<Vec<Deal>> {
     }
 }
 
-fn run(deals_path: &Path, rates_path: &Path, out_dir: &Path, clamp_monthly: bool) -> Result<()> {
-    let deals = load_deals(deals_path)?;
-    let book = read_rates(rates_path)
-        .with_context(|| format!("чтение ставок {}", rates_path.display()))?;
-
-    let cfg = Config {
-        clamp_principal_monthly: clamp_monthly,
-        ..Default::default()
-    };
-
-    if out_dir == Path::new("-") {
-        let stdout = io::stdout();
-        let mut writer = CashflowWriter::from_writer(BufWriter::new(stdout.lock()))
-            .context("запись в stdout")?;
-        for deal in &deals {
-            let (events, _) = build_cashflow(deal, &book, &cfg);
-            writer.write_deal(deal, &events)?;
-        }
-        writer.flush()?;
-        return Ok(());
-    }
-
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("создание каталога {}", out_dir.display()))?;
-
-    let cashflow_path = out_dir.join("cashflow.csv");
-    let errors_path = out_dir.join("errors.csv");
-    let file = File::create(&cashflow_path)
-        .with_context(|| format!("создание {}", cashflow_path.display()))?;
-    let mut writer = CashflowWriter::from_writer(BufWriter::new(file))
-        .with_context(|| format!("запись {}", cashflow_path.display()))?;
-
-    let mut ok = 0usize;
-    let mut failed = 0usize;
-    let mut warnings = 0usize;
-    let mut events_total = 0usize;
-    let mut all_errors = Vec::new();
-
-    for deal in &deals {
-        let (events, errors) = build_cashflow(deal, &book, &cfg);
-        writer
-            .write_deal(deal, &events)
-            .with_context(|| format!("запись кэшфлоу сделки {}", deal.deal_id))?;
-        events_total += events.len();
-        if errors.iter().any(|e| e.severity == Severity::Error) {
-            failed += 1;
-        } else {
-            ok += 1;
-        }
-        warnings += errors
-            .iter()
-            .filter(|e| e.severity == Severity::Warning)
-            .count();
-        all_errors.extend(errors);
-    }
-    writer.flush().context("закрытие cashflow.csv")?;
-
-    let errors_file = File::create(&errors_path)
-        .with_context(|| format!("создание {}", errors_path.display()))?;
-    write_errors_csv(BufWriter::new(errors_file), &all_errors)
-        .with_context(|| format!("запись {}", errors_path.display()))?;
-
-    println!(
-        "Дата расчёта: {} | сделок: {} | посчитано: {} | с ошибками: {} | предупреждений: {} | событий: {}",
-        deals.first().map(|d| d.report_dttm.to_string()).unwrap_or_default(),
-        deals.len(),
-        ok,
-        failed,
-        warnings,
-        events_total
-    );
-    println!("Индикаторы: {:?}", book.indicators().collect::<Vec<_>>());
-    println!(
-        "Готово: {} и {}",
-        cashflow_path.display(),
-        errors_path.display()
-    );
-    Ok(())
-}
-
 fn verify(result_path: &Path, golden_dir: &Path, tolerance: f64) -> Result<()> {
     let result = read_cashflow(result_path)?;
     let mut failures: Vec<String> = Vec::new();
@@ -1050,4 +1007,275 @@ fn read_cashflow(path: &Path) -> Result<Vec<CashRow>> {
         });
     }
     Ok(rows)
+}
+
+struct RunArgs {
+    deals: PathBuf,
+    rates: PathBuf,
+    out_dir: PathBuf,
+    clamp_monthly: bool,
+    threads: Option<usize>,
+    chunk: usize,
+    shift_bp: f64,
+    report_date: Option<String>,
+    summary: Option<PathBuf>,
+}
+
+/// Сводка прогона (`--summary`).
+#[derive(Serialize, Default)]
+struct Summary {
+    deals_read: usize,
+    deals_calculated: usize,
+    deals_with_errors: usize,
+    warnings: usize,
+    events: usize,
+    threads: usize,
+    chunk: usize,
+    seconds: f64,
+    deals_per_sec: f64,
+}
+
+/// Сделок в одном куске пачки, который целиком считает один поток.
+const PIECE: usize = 64;
+
+/// Пул буферов кусков: поток записи возвращает записанные буферы, расчёт берёт
+/// их снова — без переаллокаций и возврата памяти системе на каждом куске.
+#[derive(Clone, Default)]
+struct BufferPool(Arc<Mutex<Vec<Vec<u8>>>>);
+
+impl BufferPool {
+    fn take(&self) -> Vec<u8> {
+        let recycled = self.0.lock().ok().and_then(|mut p| p.pop());
+        let mut buf = recycled.unwrap_or_else(|| Vec::with_capacity(1 << 21));
+        buf.clear();
+        buf
+    }
+
+    fn give(&self, buf: Vec<u8>) {
+        if let Ok(mut p) = self.0.lock() {
+            if p.len() < 1024 {
+                p.push(buf);
+            }
+        }
+    }
+}
+
+/// Результат пачки: куски CSV (по `PIECE` сделок) и замечания, в порядке входа.
+#[derive(Default)]
+struct ChunkOut {
+    pieces: Vec<Vec<u8>>,
+    errors: Vec<DealError>,
+    deals: usize,
+    calculated: usize,
+    failed: usize,
+    warnings: usize,
+    events: usize,
+}
+
+/// Конвейер B9: поток чтения отдаёт пачки по `chunk` сделок → пачка
+/// считается и форматируется параллельно (rayon) → поток записи пишет её по
+/// порядку. Очереди на одну пачку: в памяти не больше трёх пачек, сколько бы
+/// сделок ни было в файле. Вывод не зависит от числа потоков.
+fn run(args: &RunArgs) -> Result<()> {
+    let started = Instant::now();
+    let book = read_rates(&args.rates)
+        .with_context(|| format!("чтение ставок {}", args.rates.display()))?;
+    let report_override = args
+        .report_date
+        .as_deref()
+        .map(parse_report_date)
+        .transpose()?;
+    let cfg = Config {
+        scenario_shift: args.shift_bp / 10_000.0,
+        clamp_principal_monthly: args.clamp_monthly,
+        ..Config::default()
+    };
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads.unwrap_or(0))
+        .build()
+        .context("пул потоков")?;
+    // «-» вместо файла: сделки из stdin, кэшфлоу в stdout (errors.csv и сводка — в stderr),
+    // чтобы оркестратор команды 3 гонял движок потоком без промежуточных файлов.
+    let to_stdout = args.out_dir == Path::new("-");
+    if !to_stdout {
+        std::fs::create_dir_all(&args.out_dir)
+            .with_context(|| format!("создание каталога {}", args.out_dir.display()))?;
+    }
+    let cashflow_path = args.out_dir.join("cashflow.csv");
+    let errors_path = args.out_dir.join("errors.csv");
+
+    // Чтение.
+    let input: Box<dyn Read + Send> = if args.deals == Path::new("-") {
+        Box::new(io::stdin())
+    } else {
+        Box::new(
+            File::open(&args.deals)
+                .with_context(|| format!("чтение сделок {}", args.deals.display()))?,
+        )
+    };
+    let mut reader = DealReader::new(BufReader::with_capacity(1 << 20, input))
+        .map_err(|e| anyhow!("{}: {e:?}", args.deals.display()))?;
+    let (in_tx, in_rx) = sync_channel::<Vec<Result<Deal, DealError>>>(1);
+    let chunk = args.chunk;
+    let read_thread = thread::spawn(move || loop {
+        let mut batch = Vec::with_capacity(chunk);
+        while batch.len() < chunk {
+            match reader.next_deal() {
+                Some(mut item) => {
+                    if let (Ok(deal), Some(d)) = (&mut item, report_override) {
+                        deal.report_dttm = d;
+                    }
+                    batch.push(item);
+                }
+                None => break,
+            }
+        }
+        let last = batch.len() < chunk;
+        if batch.is_empty() || in_tx.send(batch).is_err() || last {
+            break;
+        }
+    });
+
+    // Запись.
+    let (out_tx, out_rx) = sync_channel::<ChunkOut>(1);
+    let buffers = BufferPool::default();
+    let writer_buffers = buffers.clone();
+    let cf_path = cashflow_path.clone();
+    let err_path = errors_path.clone();
+    let write_thread = thread::spawn(move || -> Result<Summary> {
+        // Куски по ~1–2 МБ пишем в файл напрямую: лишняя копия через BufWriter
+        // на десятках гигабайт стоит секунды.
+        let mut out: Box<dyn Write + Send> = if to_stdout {
+            Box::new(io::stdout())
+        } else {
+            Box::new(
+                File::create(&cf_path)
+                    .with_context(|| format!("создание {}", cf_path.display()))?,
+            )
+        };
+        out.write_all(CASHFLOW_HEADER.join(",").as_bytes())?;
+        out.write_all(b"\n")?;
+        let mut errors = Vec::new();
+        let mut sum = Summary::default();
+        for c in out_rx {
+            for piece in c.pieces {
+                out.write_all(&piece)
+                    .with_context(|| format!("запись {}", cf_path.display()))?;
+                writer_buffers.give(piece);
+            }
+            sum.deals_read += c.deals;
+            sum.deals_calculated += c.calculated;
+            sum.deals_with_errors += c.failed;
+            sum.warnings += c.warnings;
+            sum.events += c.events;
+            errors.extend(c.errors);
+        }
+        out.flush().context("закрытие cashflow.csv")?;
+        if to_stdout {
+            write_errors_csv(io::stderr(), &errors).context("запись errors.csv в stderr")?;
+        } else {
+            let ef = File::create(&err_path)
+                .with_context(|| format!("создание {}", err_path.display()))?;
+            write_errors_csv(BufWriter::new(ef), &errors)
+                .with_context(|| format!("запись {}", err_path.display()))?;
+        }
+        Ok(sum)
+    });
+
+    // Расчёт: пачка режется на куски по PIECE сделок, каждый кусок считается и
+    // форматируется в одном потоке пула в свой буфер.
+    for batch in in_rx {
+        let pieces: Vec<ChunkOut> = pool.install(|| {
+            batch
+                .par_chunks(PIECE)
+                .map(|part| {
+                    let mut c = ChunkOut::default();
+                    let mut bytes = buffers.take();
+                    for item in part {
+                        c.deals += 1;
+                        match item {
+                            Ok(deal) => {
+                                let (events, errors) = generate(deal, &book, &cfg);
+                                if errors.iter().any(|e| e.severity == Severity::Error) {
+                                    c.failed += 1;
+                                } else {
+                                    c.calculated += 1;
+                                }
+                                c.warnings += errors
+                                    .iter()
+                                    .filter(|e| e.severity == Severity::Warning)
+                                    .count();
+                                c.events += events.len();
+                                format_deal(&mut bytes, deal, &events);
+                                c.errors.extend(errors);
+                            }
+                            Err(e) => {
+                                c.failed += 1;
+                                c.errors.push(e.clone());
+                            }
+                        }
+                    }
+                    c.pieces.push(bytes);
+                    c
+                })
+                .collect()
+        });
+        let mut c = ChunkOut::default();
+        for p in pieces {
+            c.pieces.extend(p.pieces);
+            c.errors.extend(p.errors);
+            c.deals += p.deals;
+            c.calculated += p.calculated;
+            c.failed += p.failed;
+            c.warnings += p.warnings;
+            c.events += p.events;
+        }
+        if out_tx.send(c).is_err() {
+            break;
+        }
+    }
+    drop(out_tx);
+    read_thread
+        .join()
+        .map_err(|_| anyhow!("поток чтения упал"))?;
+    let mut sum = write_thread
+        .join()
+        .map_err(|_| anyhow!("поток записи упал"))??;
+
+    sum.threads = pool.current_num_threads();
+    sum.chunk = args.chunk;
+    sum.seconds = started.elapsed().as_secs_f64();
+    sum.deals_per_sec = sum.deals_read as f64 / sum.seconds.max(1e-9);
+    let line = format!(
+        "сделок: {} | посчитано: {} | с ошибками: {} | предупреждений: {} | событий: {} | потоков: {} | {:.2} с | {:.0} сделок/с",
+        sum.deals_read,
+        sum.deals_calculated,
+        sum.deals_with_errors,
+        sum.warnings,
+        sum.events,
+        sum.threads,
+        sum.seconds,
+        sum.deals_per_sec
+    );
+    if to_stdout {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+        println!(
+            "Готово: {} и {}",
+            cashflow_path.display(),
+            errors_path.display()
+        );
+    }
+    if let Some(path) = &args.summary {
+        let f = File::create(path).with_context(|| format!("создание {}", path.display()))?;
+        serde_json::to_writer_pretty(f, &sum).context("запись сводки")?;
+    }
+    Ok(())
+}
+
+/// `--report-date` в формате YYYY-MM-DD.
+fn parse_report_date(s: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .map_err(|_| anyhow!("--report-date: «{s}» не дата YYYY-MM-DD"))
 }

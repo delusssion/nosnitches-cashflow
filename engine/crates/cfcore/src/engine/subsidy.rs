@@ -9,8 +9,6 @@
 //! субсидии ≤ T0, а если правило началось после T0 — с его начала (сделка
 //! 50). События: `sub_payment` и `sub_repricing`; суммы со знаком сделки.
 
-use std::collections::BTreeSet;
-
 use chrono::NaiveDate;
 
 use crate::dates;
@@ -34,11 +32,10 @@ pub fn build(deal: &Deal, rates: &RateBook, cfg: &Config, client: &[Event]) -> V
     let tau = |a: NaiveDate, b: NaiveDate| year_fraction(a, b, conv);
 
     // Даты выплат: правило sub_payment_rule ∪ {Tm} (§7).
-    let mut sub_all: BTreeSet<NaiveDate> = dates::rule_schedule(&deal.sub_payment_rule, maturity)
-        .into_iter()
-        .collect();
-    sub_all.insert(maturity);
-    let sub_all: Vec<NaiveDate> = sub_all.into_iter().filter(|d| *d <= maturity).collect();
+    let mut sub_all = dates::rule_schedule(&deal.sub_payment_rule, maturity);
+    sub_all.push(maturity);
+    sub_all.retain(|d| *d <= maturity);
+    let sub_all = super::sorted_unique(sub_all);
     let sub_future: Vec<NaiveDate> = sub_all
         .iter()
         .copied()
@@ -144,24 +141,28 @@ pub fn build(deal: &Deal, rates: &RateBook, cfg: &Config, client: &[Event]) -> V
     let mut balance = balance_at(cursor);
 
     // Точки: даты субсидии, её пересмотры и платежи тела (они меняют базу).
-    let body_dates: BTreeSet<NaiveDate> = client
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.payment_type,
-                PaymentType::PrincipalPayment | PaymentType::ClosePayment
-            )
-        })
-        .map(|e| e.payment_dttm)
-        .collect();
-    let points: BTreeSet<NaiveDate> = sub_future
-        .iter()
-        .chain(sub_repricing_future.iter())
-        .chain(body_dates.iter())
-        .copied()
-        .collect();
+    let body_dates = super::sorted_unique(
+        client
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.payment_type,
+                    PaymentType::PrincipalPayment | PaymentType::ClosePayment
+                )
+            })
+            .map(|e| e.payment_dttm)
+            .collect(),
+    );
+    let points = super::sorted_unique(
+        sub_future
+            .iter()
+            .chain(sub_repricing_future.iter())
+            .chain(body_dates.iter())
+            .copied()
+            .collect(),
+    );
 
-    let mut events: Vec<Event> = Vec::new();
+    let mut events: Vec<Event> = Vec::with_capacity(points.len() + 2);
     let (mut rate_used, mut base_used) = (rate, base);
     for p in points {
         if cursor < p {
@@ -208,7 +209,7 @@ pub fn build(deal: &Deal, rates: &RateBook, cfg: &Config, client: &[Event]) -> V
             accrued = 0.0;
             last_sub = p;
         }
-        if body_dates.contains(&p) {
+        if body_dates.binary_search(&p).is_ok() {
             balance = balance_at(p);
             if balance == 0.0 {
                 break; // тело закрыто — субсидия кончилась
