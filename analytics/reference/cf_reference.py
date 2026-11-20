@@ -26,6 +26,7 @@ H6_REPORT_DATE_IS_PAST = True  # событие ровно в дату расч�
 H7_ANN_RECALC_ON_REPRICING = True  # ANN: аннуитет от остатка на дату расчёта и при каждом репрайсинге
 H8_NO_BUSINESS_DAY_SHIFT = True  # выходные и праздники не переносим (ничего не делаем)
 H9_SCHEDULE_DIFF_TO_CLOSE = True  # разница явного графика тела и остатка — в close_payment + warning
+H10_PREPAY_KEEPS_TERM = True  # досрочка: срок прежний, ANN — новый платёж, RGM — новая доля тела
 
 # --- Наши решения по открытым вопросам (docs/QUESTIONS.md) -------------------------------
 Q13_ACCRUED_FROM_FIELD = True  # accrued_interest задан → это проценты, накопленные на дату расчёта
@@ -37,6 +38,7 @@ DAY_ORDER = {
     "sub_repricing": 0,
     "interest_payment": 1,
     "sub_payment": 2,
+    "prepayment": 2.5,  # досрочка — раньше планового тела того же дня (контракт, спринт 3)
     "principal_payment": 3,
     "close_payment": 4,
 }
@@ -159,14 +161,30 @@ def period_months(period: str) -> float:
 
 
 @dataclass
+class Scenario:
+    """Сценарий ставок: сдвиг будущего индикатора и кривые прогноза команды 2 (формат 2б)."""
+
+    shift_bp: float = 0.0
+    curves: dict[str, list[tuple[dt.date, float]]] = field(default_factory=dict)
+
+
+@dataclass
 class Indicator:
-    """Ключевая ставка ЦБ — ступенчатая функция; будущее — по H3."""
+    """Ключевая ставка ЦБ — ступенчатая функция.
+
+    До даты расчёта включительно — история. Строго после — кривая прогноза, если она есть
+    и уже началась, иначе последнее известное на дату расчёта (H3); плюс сдвиг сценария.
+    """
 
     history: list[tuple[dt.date, float]]
     report: dt.date
+    shift: float = H3_FORECAST_SHIFT
+    curve: list[tuple[dt.date, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.dates = [d for d, _ in self.history]
+        self.curve = sorted(self.curve)
+        self.curve_dates = [d for d, _ in self.curve]
 
     def known(self, d: dt.date) -> float:
         i = bisect_right(self.dates, d) - 1
@@ -177,7 +195,9 @@ class Indicator:
     def value(self, d: dt.date) -> float:
         if d <= self.report:
             return self.known(d)
-        return self.known(self.report) + H3_FORECAST_SHIFT
+        i = bisect_right(self.curve_dates, d) - 1
+        base = self.curve[i][1] if i >= 0 else self.known(self.report)
+        return base + self.shift
 
 
 def clamp(rate: float, floor: float | None, cap: float | None) -> float:
@@ -318,7 +338,10 @@ def annuity(balance: float, annual_rate: float, months: float, n: int) -> float:
 
 
 def generate_with_warnings(
-    deal: dict[str, str], key_rate: list[tuple[dt.date, float]], report_date: dt.date
+    deal: dict[str, str],
+    key_rate: list[tuple[dt.date, float]],
+    report_date: dt.date,
+    scenario: Scenario | None = None,
 ) -> tuple[list[dict], list[tuple[str, str, str]]]:
     """События сделки в формате 3 и предупреждения [(code, field, message)]."""
     warnings: list[tuple[str, str, str]] = []
@@ -337,7 +360,9 @@ def generate_with_warnings(
     deal_date = parse_date(deal["deal_dttm"]) or report
     balance = float(deal["current_principal_amt"])
     convention = deal["day_convention_cd"]
-    ind = Indicator(key_rate, report)
+    scenario = scenario or Scenario()
+    code = deal["base_indicator"] or deal["sub_float_indicator"] or "CBKEY1M"
+    ind = Indicator(key_rate, report, H3_FORECAST_SHIFT + scenario.shift_bp / 10_000, scenario.curves.get(code, []))
     tau = lambda a, b: year_fraction(convention, a, b)  # noqa: E731
 
     if not is_future(maturity, report):
@@ -372,6 +397,10 @@ def generate_with_warnings(
     else:
         principal_future = [d for d in principal_dates_all(deal, maturity, interest_all) if is_future(d, report)]
         planned = {}
+
+    # Досрочки (необязательная колонка prepayment_schedule): будущие даты внутри срока.
+    prepay_raw = deal.get("prepayment_schedule") or deal.get("prepayment") or ""
+    prepay = {d: a for d, a in explicit_amounts(prepay_raw).items() if is_future(d, report) and d <= maturity}
 
     sub = make_sub_leg(deal, deal_date, maturity)
     sub_future: list[dt.date] = []
@@ -425,6 +454,7 @@ def generate_with_warnings(
     # 3. Проход по будущим датам событий.
     points = sorted(
         set(interest_future) | set(principal_future) | set(repricing_future) | set(sub_future) | set(sub_repricing_future)
+        | set(prepay)
     )
     events: list[dict] = []
     rate_used, base_used = rate, base
@@ -476,6 +506,29 @@ def generate_with_warnings(
             sub_accrued = 0.0
             last_sub = p
 
+        # 3.4а Досрочное погашение (H10): остаток меньше, срок прежний.
+        if p in prepay:
+            amount = min(abs(prepay[p]), abs(balance)) * (1 if balance > 0 else -1)
+            if amount != 0:
+                closes = abs(balance - amount) < 1e-9
+                emit(p, "prepayment", "client", amount, balance, 0.0 if closes else balance - amount,
+                     rate_used, base_used)
+                balance = 0.0 if closes else balance - amount
+                if closes:
+                    # досрочка на весь остаток закрывает сделку: проценты за хвост — в этот же день
+                    if accrued != 0:
+                        emit(p, "interest_payment", "client", accrued, 0.0, 0.0, rate_used, base_used,
+                             (last_interest, p))
+                        accrued = 0.0
+                    break
+                # оставшиеся даты тела — включая плановую дату p: она идёт после досрочки
+                n_rest = len([d for d in principal_future if d >= p])
+                if H10_PREPAY_KEEPS_TERM and n_rest:
+                    if disc == "ANN":
+                        ann_payment = annuity(balance, rate, months, n_rest)
+                    elif disc == "RGM":
+                        rgm_share = balance / n_rest
+
         # 3.5 Погашение тела.
         if p in principal_future:
             is_last = p == principal_future[-1]
@@ -519,8 +572,13 @@ def generate_with_warnings(
     return events, warnings
 
 
-def generate(deal: dict[str, str], key_rate: list[tuple[dt.date, float]], report_date: dt.date) -> list[dict]:
-    return generate_with_warnings(deal, key_rate, report_date)[0]
+def generate(
+    deal: dict[str, str],
+    key_rate: list[tuple[dt.date, float]],
+    report_date: dt.date,
+    scenario: Scenario | None = None,
+) -> list[dict]:
+    return generate_with_warnings(deal, key_rate, report_date, scenario)[0]
 
 
 # --- Вывод ---------------------------------------------------------------------------------
