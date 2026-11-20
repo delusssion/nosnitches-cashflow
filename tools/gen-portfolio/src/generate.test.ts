@@ -60,3 +60,34 @@ test('поля в границах контракта', () => {
   }
   assert.equal(DEAL_COLUMNS.length, 48);
 });
+
+test('досрочки: без флага файл прежний, с флагом — своя колонка, остальные поля те же', async () => {
+  const { dealStream, columnsFor } = await import('./generate.ts');
+  const read = async (prepayShare: number) => {
+    const rows: (string | number)[][] = [];
+    for await (const r of dealStream({ n: 3000, seed: 7, reportDate: REPORT, prepayShare }))
+      rows.push(r);
+    return rows;
+  };
+  const plain = await read(0);
+  const withPrepay = await read(0.3);
+  assert.equal(columnsFor(0).length, 48);
+  assert.equal(columnsFor(0.3).at(-1), 'prepayment_schedule');
+  assert.deepEqual(
+    withPrepay.map((r) => r.slice(0, 48)),
+    plain,
+  );
+  const sched = withPrepay.map((r) => String(r[48]));
+  const share = sched.filter(Boolean).length / sched.length;
+  assert.ok(share > 0.2 && share < 0.3, `доля ${share}`);
+  for (const [i, s] of sched.entries()) {
+    if (!s) continue;
+    const row = withPrepay[i]!;
+    const current = Number(row[5]);
+    assert.ok(current > 0, 'досрочки только у кредитов');
+    const parts = s.split(' ').map((p) => p.split(','));
+    const total = parts.reduce((a, [, v]) => a + Number(v), 0);
+    assert.ok(total < current, 'досрочки меньше остатка');
+    for (const [d] of parts) assert.ok(d! > REPORT && d! < String(row[7]), 'дата внутри срока');
+  }
+});

@@ -167,3 +167,34 @@ export function makeDeal(rng: Rng, index: number, reportDate: string): DealRow {
   }
   return row;
 }
+
+/** Необязательная 49-я колонка (спринт 3): досрочные погашения «дата,сумма» через пробел. */
+export const PREPAYMENT_COLUMN = 'prepayment_schedule';
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Досрочки для сделки: 1–2 частичных погашения по 5–30 % текущего остатка в случайные даты
+ * между датой расчёта + 1 месяц и датой погашения − 1 месяц. Только у кредитов (не у депозитов).
+ * Отдельный генератор `rng`, чтобы флаг досрочек не менял остальные поля портфеля.
+ */
+export function makePrepayments(rng: Rng, deal: DealRow, share: number): string {
+  if (!rng.chance(share)) return '';
+  const current = Number(deal.current_principal_amt);
+  if (!(current > 0)) return '';
+  const from = Date.parse(String(deal.report_dttm)) + 31 * DAY_MS;
+  const to = Date.parse(String(deal.maturity_dttm)) - 31 * DAY_MS;
+  if (to <= from) return '';
+  const count = rng.chance(0.25) ? 2 : 1;
+  const dates = Array.from({ length: count }, () =>
+    iso(from + Math.floor((rng.float() * (to - from)) / DAY_MS) * DAY_MS),
+  ).sort();
+  let left = current;
+  return dates
+    .map((d) => {
+      const amount = r2(left * rng.uniform(0.05, 0.3));
+      left -= amount;
+      return `${d},${amount}`;
+    })
+    .join(' ');
+}
