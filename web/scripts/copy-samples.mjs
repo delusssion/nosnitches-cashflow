@@ -18,6 +18,7 @@ for (const name of ['cashflow.csv', 'errors.csv']) {
 }
 cpSync(resolve(testdata, 'deals/test_deals.csv'), resolve(dest, 'engine/test_deals.csv'));
 cpSync(resolve(testdata, 'samples/scenario'), resolve(dest, 'scenario'), { recursive: true });
+cpSync(resolve(testdata, 'rates/key_rate.csv'), resolve(dest, 'key_rate.csv'));
 
 const golden = readdirSync(resolve(testdata, 'golden')).filter((f) => /^deal_.+\.csv$/.test(f));
 for (const name of golden) cpSync(resolve(testdata, 'golden', name), resolve(dest, 'golden', name));
