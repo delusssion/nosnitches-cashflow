@@ -29,15 +29,15 @@ export const Discriminator = {
 } as const;
 export type Discriminator = (typeof Discriminator)[keyof typeof Discriminator];
 
-/** Порядок событий в один день по контракту. */
+/** Порядок событий в один день: контракт + досрочное погашение перед плановым телом (движок, спринт 3). */
 export const EVENT_DAY_ORDER: Record<PaymentType, number> = {
   repricing: 0,
   sub_repricing: 0,
   interest_payment: 1,
   sub_payment: 2,
-  principal_payment: 3,
-  close_payment: 4,
-  prepayment: 5,
+  prepayment: 3,
+  principal_payment: 4,
+  close_payment: 5,
 };
 
 export interface CashflowEvent {
@@ -108,6 +108,17 @@ export interface Deal {
   sub_repricing_rule_first_event_flg: string | null;
   indicator_lag_cd: string | null;
   sub_indicator_lag_cd: string | null;
+  /** Необязательная 49-я колонка (спринт 3): досрочные погашения «дата,сумма» через пробел. */
+  prepayment_schedule: string | null;
+}
+
+/** Строка errors.csv движка: `deal_id,severity,code,field,message`. */
+export interface EngineIssue {
+  deal_id: string | null;
+  severity: 'error' | 'warning';
+  code: string;
+  field: string | null;
+  message: string | null;
 }
 
 export interface ValidationError {
@@ -117,9 +128,10 @@ export interface ValidationError {
   message: string;
 }
 
-export type CsvKind = 'cashflow' | 'deals';
+export type CsvKind = 'cashflow' | 'deals' | 'errors';
 
 export interface RowTypes {
   cashflow: CashflowEvent;
   deals: Deal;
+  errors: EngineIssue;
 }

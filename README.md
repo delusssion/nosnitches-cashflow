@@ -44,6 +44,17 @@ npm run dev        # http://localhost:5173
 - **Сделка** — параметры, временная шкала событий и остатка, таблица событий, экспорт CSV.
 - **Сверка** — результат движка против эталонов `testdata/golden/`, допуск по умолчанию 0,01 ₽, экспорт отчёта.
 
+Кнопка «Результат движка: 55 сделок» на «Портфеле» загружает реальный вывод `cfgen` (кэшфлоу, сделки, `errors.csv`), кнопка «Движок против эталонов» на «Сверке» — сверку этого вывода с `testdata/golden`.
+
+Свой прогон движка для просмотрщика:
+
+```bash
+cd engine
+cargo run --release -p cfgen -- run --deals ../testdata/deals/test_deals.csv --rates ../testdata/rates/key_rate.csv --out-dir out
+```
+
+В просмотрщик загружаются `out/cashflow.csv`, `out/errors.csv` и файл сделок. Досрочные погашения — необязательная колонка `prepayment_schedule` в файле сделок (`дата,сумма` через пробел).
+
 Проверки: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`.
 Сценарий демо и скриншоты: [docs/DEMO.md](docs/DEMO.md), `npx playwright test` (первый раз — `npx playwright install chromium`).
 

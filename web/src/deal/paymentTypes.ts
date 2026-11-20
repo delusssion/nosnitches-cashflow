@@ -8,7 +8,7 @@ export const PAYMENT_TYPE_INFO: Record<PaymentType, { label: string; color: stri
     repricing: { label: 'репрайсинг', color: '#0E6B57', bg: '#D5EBE4' },
     sub_payment: { label: 'субсидия', color: '#8A4F9E', bg: '#EEE1F2' },
     sub_repricing: { label: 'репрайсинг субсидии', color: '#6B3A7C', bg: '#E6D6EC' },
-    prepayment: { label: 'досрочное', color: '#55665F', bg: '#E4EAE8' },
+    prepayment: { label: 'досрочное погашение', color: '#1D7A8C', bg: '#D6EEF2' },
   };
 
 export const PAYMENT_TYPES = Object.keys(PAYMENT_TYPE_INFO) as PaymentType[];

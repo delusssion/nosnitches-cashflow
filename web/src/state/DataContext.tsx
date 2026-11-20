@@ -1,7 +1,7 @@
 import { createContext, useCallback, useMemo, useState, type ReactNode } from 'react';
 import { parseCsv } from '../data/parseCsv';
 import { buildStore, type CashflowStore } from '../data/store';
-import type { CashflowEvent, CsvKind, Deal, ValidationError } from '../data/types';
+import type { CashflowEvent, CsvKind, Deal, EngineIssue, ValidationError } from '../data/types';
 
 export interface LoadState {
   fileName: string;
@@ -16,23 +16,48 @@ export interface LoadState {
 export interface DataState {
   cashflow: CashflowStore | null;
   deals: Map<string, Deal> | null;
+  /** Замечания движка (errors.csv) по deal_id. */
+  issues: Map<string, EngineIssue[]> | null;
   loads: Partial<Record<CsvKind, LoadState>>;
   loadFile: (kind: CsvKind, file: Blob, fileName: string) => Promise<void>;
-  loadDemo: () => Promise<void>;
+  loadDemo: (set?: DemoSet) => Promise<void>;
   reset: () => void;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const DataContext = createContext<DataState | null>(null);
 
-const DEMO_FILES: Record<CsvKind, string> = {
-  cashflow: 'samples/cashflow_sample.csv',
-  deals: 'samples/deals_sample.csv',
+export type DemoSet = 'samples' | 'engine';
+
+/** Наборы демо-данных: учебные (3 сделки) и реальный вывод движка cfgen по 55 тестовым сделкам. */
+// eslint-disable-next-line react-refresh/only-export-components
+export const DEMO_SETS: Record<DemoSet, Partial<Record<CsvKind, string>>> = {
+  samples: {
+    cashflow: 'samples/cashflow_sample.csv',
+    deals: 'samples/deals_sample.csv',
+  },
+  engine: {
+    cashflow: 'samples/engine/cashflow.csv',
+    deals: 'samples/engine/test_deals.csv',
+    errors: 'samples/engine/errors.csv',
+  },
 };
+
+function groupIssues(rows: EngineIssue[]): Map<string, EngineIssue[]> {
+  const map = new Map<string, EngineIssue[]>();
+  for (const r of rows) {
+    const id = r.deal_id ?? '';
+    const list = map.get(id);
+    if (list) list.push(r);
+    else map.set(id, [r]);
+  }
+  return map;
+}
 
 export function DataProvider({ children }: { children: ReactNode }) {
   const [cashflow, setCashflow] = useState<CashflowStore | null>(null);
   const [deals, setDeals] = useState<Map<string, Deal> | null>(null);
+  const [issues, setIssues] = useState<Map<string, EngineIssue[]> | null>(null);
   const [loads, setLoads] = useState<DataState['loads']>({});
 
   const patch = useCallback(
@@ -60,8 +85,10 @@ export function DataProvider({ children }: { children: ReactNode }) {
         });
         if (kind === 'cashflow') {
           setCashflow(buildStore(res.rows as CashflowEvent[]));
-        } else {
+        } else if (kind === 'deals') {
           setDeals(new Map((res.rows as Deal[]).map((d) => [d.deal_id, d])));
+        } else {
+          setIssues(groupIssues(res.rows as EngineIssue[]));
         }
         patch(kind, {
           status: 'done',
@@ -77,24 +104,31 @@ export function DataProvider({ children }: { children: ReactNode }) {
     [patch],
   );
 
-  const loadDemo = useCallback(async () => {
-    await Promise.all(
-      (Object.keys(DEMO_FILES) as CsvKind[]).map(async (kind) => {
-        const res = await fetch(DEMO_FILES[kind]);
-        await loadFile(kind, await res.blob(), DEMO_FILES[kind].split('/').pop()!);
-      }),
-    );
-  }, [loadFile]);
-
   const reset = useCallback(() => {
     setCashflow(null);
     setDeals(null);
+    setIssues(null);
     setLoads({});
   }, []);
 
+  const loadDemo = useCallback(
+    async (set: DemoSet = 'samples') => {
+      reset();
+      const files = DEMO_SETS[set];
+      await Promise.all(
+        (Object.keys(files) as CsvKind[]).map(async (kind) => {
+          const path = files[kind]!;
+          const res = await fetch(path);
+          await loadFile(kind, await res.blob(), path.split('/').pop()!);
+        }),
+      );
+    },
+    [loadFile, reset],
+  );
+
   const value = useMemo(
-    () => ({ cashflow, deals, loads, loadFile, loadDemo, reset }),
-    [cashflow, deals, loads, loadFile, loadDemo, reset],
+    () => ({ cashflow, deals, issues, loads, loadFile, loadDemo, reset }),
+    [cashflow, deals, issues, loads, loadFile, loadDemo, reset],
   );
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

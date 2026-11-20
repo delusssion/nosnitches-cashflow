@@ -6,12 +6,8 @@ import { PAYMENT_TYPE_INFO } from './paymentTypes';
 // Временная шкала как на схеме эксперта: тело и проценты — флажки над осью,
 // субсидия и репрайсинг — под осью; ниже ступенчатая линия остатка долга.
 const LANES: { name: string; color: string; y: number; types: PaymentType[] }[] = [
-  {
-    name: 'Тело',
-    color: '#3E5BA8',
-    y: 2,
-    types: ['principal_payment', 'close_payment', 'prepayment'],
-  },
+  { name: 'Досрочно', color: '#1D7A8C', y: 3, types: ['prepayment'] },
+  { name: 'Тело', color: '#3E5BA8', y: 2, types: ['principal_payment', 'close_payment'] },
   { name: 'Проценты', color: '#B4541A', y: 1, types: ['interest_payment'] },
   { name: 'Субсидия', color: '#8A4F9E', y: -1, types: ['sub_payment'] },
   { name: 'Репрайсинг', color: '#0E6B57', y: -2, types: ['repricing', 'sub_repricing'] },
@@ -49,7 +45,7 @@ export function timelineOption(
         }
       : undefined;
 
-  const lanes = LANES.map((lane, i) => {
+  const lanes = LANES.map((lane) => {
     const data = events
       .filter((e) => lane.types.includes(e.payment_type))
       .map((e) => ({ value: [e.payment_dttm, lane.y], event: e }));
@@ -74,7 +70,7 @@ export function timelineOption(
             }
           : { show: false },
       data,
-      markLine: i === 0 ? reportLine(true) : undefined,
+      markLine: lane.name === 'Тело' ? reportLine(true) : undefined,
     };
   });
 
@@ -128,7 +124,7 @@ export function timelineOption(
       { type: 'time', gridIndex: 1, ...range, axisLabel: { formatter: '{dd}.{MM}.{yyyy}' } },
     ],
     yAxis: [
-      { type: 'value', gridIndex: 0, min: -3.4, max: 3.4, show: false },
+      { type: 'value', gridIndex: 0, min: -3.4, max: 5, show: false },
       {
         type: 'value',
         gridIndex: 1,

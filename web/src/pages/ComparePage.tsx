@@ -139,6 +139,8 @@ function SideStatus({ side }: { side: SideState }) {
 }
 
 const DEMO = 'samples/cashflow_sample.csv';
+const ENGINE_RESULT = 'samples/engine/cashflow.csv';
+const GOLDEN_INDEX = 'samples/golden/index.json';
 
 export function ComparePage() {
   const { engine, golden, tolerance, setTolerance, loadSide } = useCompare();
@@ -198,6 +200,22 @@ export function ComparePage() {
     ]);
   };
 
+  // Настоящая сверка: вывод cfgen по 55 тестовым сделкам против эталонов аналитика testdata/golden.
+  const loadEngineVsGolden = async () => {
+    const names: string[] = await (await fetch(GOLDEN_INDEX)).json();
+    const golden = await Promise.all(
+      names.map(async (name) => ({
+        blob: await (await fetch(`samples/golden/${name}`)).blob(),
+        name,
+      })),
+    );
+    const engine = await (await fetch(ENGINE_RESULT)).blob();
+    await Promise.all([
+      loadSide('engine', [{ blob: engine, name: 'cfgen: cashflow.csv (55 сделок)' }]),
+      loadSide('golden', golden),
+    ]);
+  };
+
   return (
     <section className={styles.page}>
       <div className={styles.toolbar}>
@@ -220,6 +238,9 @@ export function ComparePage() {
           </label>
           <button className={ui.buttonGhost} onClick={() => void loadDemo()}>
             Демо-сверка
+          </button>
+          <button className={ui.button} onClick={() => void loadEngineVsGolden()}>
+            Движок против эталонов
           </button>
           {result && (
             <button
@@ -264,6 +285,12 @@ export function ComparePage() {
             {stats.bad === 0
               ? `✓ Все ${fmtInt(stats.deals)} сделок совпали с эталоном при допуске ${fmtMoney(tolerance)} ₽`
               : `✗ Отличия в ${fmtInt(stats.deals - stats.okDeals)} из ${fmtInt(stats.deals)} сделок`}
+            {result.skippedDeals > 0 && (
+              <span className={ui.muted}>
+                {' '}
+                · ещё {fmtInt(result.skippedDeals)} сделок движка без эталона не сверялись
+              </span>
+            )}
           </div>
           <div className={ui.stats}>
             <StatTile
