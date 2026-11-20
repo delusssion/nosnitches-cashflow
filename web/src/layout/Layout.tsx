@@ -5,6 +5,7 @@ const NAV = [
   { to: '/', label: 'Портфель', end: true },
   { to: '/deal', label: 'Сделка', end: false },
   { to: '/compare', label: 'Сверка', end: false },
+  { to: '/scenario', label: 'Сценарий', end: false },
 ];
 
 export function Layout() {

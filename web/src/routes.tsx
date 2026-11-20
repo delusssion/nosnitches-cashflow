@@ -3,6 +3,7 @@ import { Layout } from './layout/Layout';
 import { ComparePage } from './pages/ComparePage';
 import { DealPage } from './pages/DealPage';
 import { PortfolioPage } from './pages/PortfolioPage';
+import { ScenarioPage } from './pages/ScenarioPage';
 
 export const routes: RouteObject[] = [
   {
@@ -13,6 +14,7 @@ export const routes: RouteObject[] = [
       { path: 'deal', element: <DealPage /> },
       { path: 'deal/:id', element: <DealPage /> },
       { path: 'compare', element: <ComparePage /> },
+      { path: 'scenario', element: <ScenarioPage /> },
     ],
   },
 ];
