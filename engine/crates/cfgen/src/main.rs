@@ -133,6 +133,15 @@ enum Command {
         /// Ограничение: не более 1 платежа тела в месяц
         #[arg(long)]
         clamp_monthly: bool,
+        /// Кривые прогноза индикатора (команда 2)
+        #[arg(long, value_name = "FILE")]
+        curves: Option<PathBuf>,
+        /// Сценарий из файла кривых (колонка scenario): например base или stress
+        #[arg(long, value_name = "NAME")]
+        scenario: Option<String>,
+        /// Дата расчёта для сделки (YYYY-MM-DD)
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        report_date: Option<String>,
     },
 }
 
@@ -177,6 +186,9 @@ fn main() -> Result<()> {
         Command::Scenario {
             deals,
             rates,
+            curves,
+            scenario: scen,
+            report_date,
             deal_id,
             set_fields,
             prepayments,
@@ -184,6 +196,9 @@ fn main() -> Result<()> {
         } => scenario(
             &deals,
             &rates,
+            curves.as_deref(),
+            scen.as_deref(),
+            report_date.as_deref(),
             &deal_id,
             &set_fields,
             &prepayments,
@@ -196,23 +211,52 @@ fn main() -> Result<()> {
 // 1. Сценарный анализ (Scenario Diff)
 // ==============================================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn scenario(
     deals_path: &Path,
     rates_path: &Path,
+    curves_path: Option<&Path>,
+    scenario_name: Option<&str>,
+    report_date: Option<&str>,
     deal_id: &str,
     set_fields: &[String],
     prepayments: &[String],
     clamp_monthly: bool,
 ) -> Result<()> {
     let deals = load_deals(deals_path)?;
-    let book = read_rates(rates_path)
+    let mut base_book = read_rates(rates_path)
         .with_context(|| format!("чтение ставок {}", rates_path.display()))?;
+    let mut mod_book = base_book.clone();
 
-    let base_deal = deals
+    if let Some(cp) = curves_path {
+        if let Some(scen) = scenario_name {
+            if scen.eq_ignore_ascii_case("stress") {
+                // Если выбран stress — базой выступает base сценарий
+                if let Ok(base_map) = read_curves(cp, Some("base")) {
+                    base_book.set_forecasts(base_map);
+                }
+            }
+            let mod_map = read_curves(cp, Some(scen))
+                .with_context(|| format!("чтение кривых {}", cp.display()))?;
+            mod_book.set_forecasts(mod_map);
+        } else {
+            let curves_map =
+                read_curves(cp, None).with_context(|| format!("чтение кривых {}", cp.display()))?;
+            base_book.set_forecasts(curves_map.clone());
+            mod_book.set_forecasts(curves_map);
+        }
+    }
+
+    let mut base_deal = deals
         .iter()
         .find(|d| d.deal_id == deal_id)
         .cloned()
         .with_context(|| format!("сделка «{deal_id}» не найдена в {}", deals_path.display()))?;
+
+    if let Some(rep_d_str) = report_date {
+        let rep_d = parse_report_date(rep_d_str)?;
+        base_deal.report_dttm = rep_d;
+    }
 
     let mut mod_deal = base_deal.clone();
 
@@ -244,8 +288,8 @@ fn scenario(
         ..Default::default()
     };
 
-    let (base_events, base_errs) = build_cashflow(&base_deal, &book, &base_cfg);
-    let (mod_events, mod_errs) = build_cashflow(&mod_deal, &book, &mod_cfg);
+    let (base_events, base_errs) = build_cashflow(&base_deal, &base_book, &base_cfg);
+    let (mod_events, mod_errs) = build_cashflow(&mod_deal, &mod_book, &mod_cfg);
 
     if base_errs.iter().any(|e| e.severity == Severity::Error) {
         bail!("Ошибки в базовой сделке: {:?}", base_errs);

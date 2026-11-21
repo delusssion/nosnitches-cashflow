@@ -1,0 +1,7 @@
+indicator,date,rate,scenario
+CBKEY1M,2022-12-01,0.10,base
+CBKEY1M,2023-01-01,0.09,base
+CBKEY1M,2026-12-01,0.10,base
+CBKEY1M,2022-12-01,0.12,stress
+CBKEY1M,2023-01-01,0.14,stress
+CBKEY1M,2026-12-01,0.12,stress
